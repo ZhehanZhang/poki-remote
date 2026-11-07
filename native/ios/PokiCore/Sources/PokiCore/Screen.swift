@@ -151,7 +151,13 @@ func listable(_ elements: [Element], _ size: ScreenSize) -> [Element] {
     elements.filter { e in
         guard !e.text.isEmpty else { return false }
         let f = e.frame
-        return f.x + f.width > 0 && f.y + f.height > 0 && f.x < size.width && f.y < size.height
+        guard f.x + f.width > 0 && f.y + f.height > 0 && f.x < size.width && f.y < size.height else { return false }
+        // The Dynamic Island (and Poki's Live Activity in it) is never listed: a tap there opens Poki.
+        // It is the top 64 points of the screen in the middle half of the width; no app content
+        // lies there (the status bar ends at 62 on an iPhone 17 Pro).
+        let centre = f.x + f.width / 2
+        if f.y + f.height <= 64, centre > size.width / 4, centre < size.width * 3 / 4, size.width < 1000 { return false }
+        return true
     }
 }
 

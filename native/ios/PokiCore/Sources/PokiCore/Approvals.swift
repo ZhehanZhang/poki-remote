@@ -1,7 +1,9 @@
 import Foundation
 
 /// What needs the owner's approval on the phone before it is sent. Words match whole words or
-/// phrases, case-insensitively, in the label of the element an action touches.
+/// phrases, case-insensitively, at the start of the label of the element an action touches, or
+/// anywhere in a short label (a button: "Confirm and pay"); a name inside a longer text is not an
+/// action (seen on the phone: "Contact photo for Best Buy" was taken for a payment).
 public struct SensitivityRules: Sendable, Equatable {
     public var secureFields = true
     public var payments: [String] = ["pay", "buy", "purchase", "subscribe", "checkout", "place order", "transfer", "send money", "confirm payment", "apple pay", "支付", "付款", "购买", "订阅", "转账", "确认支付", "下单"]
@@ -24,7 +26,9 @@ public struct SensitivityRules: Sendable, Equatable {
             let before = range.lowerBound == lowered.startIndex ? nil : lowered[lowered.index(before: range.lowerBound)]
             let after = range.upperBound == lowered.endIndex ? nil : lowered[range.upperBound]
             let boundary: (Character?) -> Bool = { c in c.map { !$0.isLetter } ?? true }
-            if boundary(before) && boundary(after) { return word }
+            let opens = lowered[..<range.lowerBound].allSatisfy { !$0.isLetter && !$0.isNumber }
+            let short = lowered.split(whereSeparator: { $0.isWhitespace }).count <= 4
+            if boundary(before) && boundary(after) && (opens || short) { return word }
         }
         return nil
     }

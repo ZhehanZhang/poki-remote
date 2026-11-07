@@ -217,7 +217,17 @@ Each answer is facts only: the app in front, numbered elements, what each action
 - **Locked phone**: `do` checks `/wda/locked` first and sends nothing but buttons while locked
   (`screen: locked`); `look` says so too. Unknown counts as unlocked.
 - **Approvals**: the owner's time on an approval does not count against the actions or the read;
-  a `do` that waited for one may take up to `toolDeadline + approvalWait` (about 46 s).
+  a `do` that waited for one may take up to `toolDeadline + approvalWait` (about 46 s), and one
+  that had to wait for the runner to start adds that wait too (at most `runnerWait`, 15 s).
+- **Poki's own screen is never worked in by mistake**: a tap near the top of the screen can land on
+  Poki's Live Activity in the Dynamic Island, and the owner's answer to an approval can open Poki
+  (seen on the phone, Nov 6 2026 10:35 pm ET: `Tap "Back"` and `Tap "All Inboxes"` answered
+  `app: Poki`). The Dynamic Island (the top 64 points, middle half of the width) is never listed.
+  After an approval, and after the read that follows the actions, Poki in front where another app
+  was being worked in means that app is activated again (`note: Poki was in front …; Mail was
+  brought back`) and the read is made again; the model never sees Poki's screen as the result of
+  a tap. Working in Poki on purpose (the last read showed Poki) is left alone. The app's bundle id
+  is `CoreConfig.ownBundleID`.
 - **`wait_until`**: `{wait_until: "text"}`, `{wait_until: {text, gone: true, ms}}` or
   `{wait_until: {settled: true, ms}}` reads the tree every 250 ms until the text appears or goes, or
   two reads match (default 3 s, at most 10 s, within the action time). Not seeing it is reported, not
@@ -226,7 +236,11 @@ Each answer is facts only: the app in front, numbered elements, what each action
 ### Deadlines (no hangs)
 
 - Every runner HTTP call has its own timeout (reads 4 s, taps 3 s, typing 3 s plus 60 ms per
-  character, launches 8 s) and the whole tool call has `toolDeadline`.
+  character, launches 8 s), every action has its own action time (`actionCap`, 6 s, from when it
+  starts; a launch 9 s), and the whole tool call has `toolDeadline` (25 s, the actions and the read
+  together). The action time starts when the actions do, after the runner's start and the lock
+  check (seen on the phone: a launch sent while the runner was starting had its time used up
+  before it went, and a batch of Home, tap and drag had 6 s for all three).
 - At the deadline the tool answers anyway, saying which step did not finish and whether it may
   have been delivered, plus the last good read if any. A late runner answer is dropped.
 - Two refused or broken runner requests in a row mark the runner unhealthy: PokiCore calls
@@ -255,7 +269,8 @@ Each answer is facts only: the app in front, numbered elements, what each action
   clears the note.
 - A plain `launch` activates the app (to the front as it is, or started if not running); only `fresh:
   true` ends it and starts it through XCTest's launch, whose handshake takes several seconds on the
-  phone (a Photos launch hit the 6 s action time there). A launch action gets 9 s of action time.
+  phone (a Photos launch hit the 6 s action time there). A launch action gets 9 s of action time,
+  from when it starts.
 - Buttons (Home, lock, volume) get 8 s and a slow answer does not count as a runner miss. WDA's
   `/wda/homescreen` waits for SpringBoard to come up and go idle before it answers: about 3 s on the CI
   simulator (a 3 s timeout failed there), and it holds WDA's main thread the same way on a phone, where
@@ -309,7 +324,7 @@ and falls back to the picture.
 | Rule | Default |
 |---|---|
 | Typing into a secure text field | approval |
-| Tapping an element whose label matches the payment words (Pay, Buy, Purchase, Subscribe, Transfer, Send money, 支付, 付款, 购买, 转账, …) | approval |
+| Tapping an element whose label starts with a payment word, or is a short label (four words or fewer) holding one (Pay, Buy, Purchase, Subscribe, Transfer, Send money, 支付, 付款, 购买, 转账, …); a name inside a longer text is not an action (`Contact photo for Best Buy`) | approval |
 | Deleting (Delete, Remove, Erase, Reset, 删除, 移除, 抹掉, …) | approval |
 | Sending a message or mail (Send, 发送 in Messages, Mail, WeChat, WhatsApp, Telegram, …) | approval |
 | Apps on a list (banking, wallets; by bundle id) | approval for every input |

@@ -385,3 +385,92 @@ final class FaultTests: XCTestCase {
         XCTAssertTrue(result.text.contains("wait_until: the screen held still after"), result.text)
     }
 }
+
+/// The owner's Mail test on the phone (Nov 6 2026, 10:34 pm ET): a launch sent while the runner was
+/// starting had its action time used up before it went; a batch of three plain actions had 6 s for
+/// all of them; "Contact photo for Best Buy" was taken for a payment; taps near the top of the screen
+/// landed on Poki's Live Activity in the Dynamic Island and opened Poki, where the next taps went.
+final class MailTestTests: XCTestCase {
+    func testTheRunnersStartIsNotTheActionsTime() async {
+        let host = FakeHost()
+        host.state.value = .starting("launching")
+        let (core, wda, _) = makeCore(host: host) { $0.actionCap = 1; $0.toolDeadline = 5; $0.readTimeout = 1; $0.runnerWait = 4 }
+        Task { try? await Task.sleep(nanoseconds: 1_500_000_000); host.state.value = .running }
+        let result = await core.call("do", ["actions": [["launch": "com.apple.mobilemail"]]])
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("launch com.apple.mobilemail (sent"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/apps/activate").count, 1)
+    }
+
+    func testEachActionHasItsOwnTime() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 0.6; $0.toolDeadline = 6; $0.readTimeout = 1 }
+        for key in ["POST /wda/pressButton", "POST /wda/tap", "POST /wda/dragfromtoforduration"] {
+            wda.set(key) { _ in try await Task.sleep(nanoseconds: 400_000_000); return (200, ["value": .null]) }
+        }
+        _ = await core.call("look", [:])
+        let result = await core.call("do", ["actions": [["button": "home"], ["tap": [100, 300]], ["drag": [0, 400, 200, 400]]]])
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(result.text.components(separatedBy: "(sent, ").count - 1, 3, result.text)
+    }
+
+    func testANameInALongerLabelIsNotAPayment() {
+        let rules = SensitivityRules()
+        let mail = Foreground(bundleID: "com.apple.mobilemail", name: "Mail")
+        func reason(_ type: String, _ label: String) -> String? {
+            rules.reason(touching: Element(type: type, label: label, value: nil, identifier: nil, frame: Rect(x: 0, y: 0, width: 40, height: 40), depth: 1), typing: false, app: mail, secureOnScreen: false)
+        }
+        XCTAssertNil(reason("Image", "Contact photo for Best Buy"))
+        XCTAssertNil(reason("Cell", "Best Buy, Your order has shipped, Yesterday, Thanks for buying from us"))
+        XCTAssertNil(reason("Cell", "PayPal, Receipt for your payment to Chase, Today"))
+        XCTAssertEqual(reason("Button", "Buy now"), "a payment (\"buy\")")
+        XCTAssertEqual(reason("Button", "Pay $12.00"), "a payment (\"pay\")")
+        XCTAssertEqual(reason("Button", "Confirm and pay"), "a payment (\"pay\")")
+        XCTAssertEqual(reason("Button", "Delete Message"), "deleting (\"delete\")")
+        XCTAssertEqual(reason("Button", "Send"), "sending a message (\"send\")")
+        XCTAssertNil(reason("Cell", "Re: Please send the files when you have them, John, Monday"))
+    }
+
+    func testTheDynamicIslandIsNeverListed() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([
+            Node("Other", "Working", [150, 12, 90, 36]),
+            Node("Other", "Poki", [120, 8, 150, 44]),
+            Node("StaticText", "9:41", [30, 20, 50, 20]),
+            Node("NavigationBar", "Mailboxes", [0, 62, 390, 44], [Node("Button", "Back", [8, 66, 60, 36]), Node("Button", "Edit", [330, 66, 50, 36])]),
+            Node("Cell", "All Inboxes, 257 unread messages", [0, 110, 390, 44]),
+        ], app: "Mail")
+        let result = await core.call("look", [:])
+        XCTAssertFalse(result.text.contains("Working"), result.text)
+        XCTAssertFalse(result.text.contains("\"Poki\""), result.text)
+        XCTAssertTrue(result.text.contains("Button \"Back\""), result.text)
+        XCTAssertTrue(result.text.contains("All Inboxes"), result.text)
+        XCTAssertTrue(result.text.contains("9:41"), "the status bar at the sides stays")
+    }
+
+    func testATapThatOpensPokiBringsTheAppBack() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("NavigationBar", "Mailboxes", [0, 62, 390, 44], [Node("Button", "Back", [8, 66, 60, 36])]), Node("Cell", "All Inboxes", [0, 110, 390, 44])], app: "Mail")
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.mobilemail", "name": "Mail"]]) }
+        _ = await core.call("look", [:])
+        // The tap lands on the Live Activity: Poki comes to the front.
+        wda.set("POST /wda/tap") { [wda] _ in
+            wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "nz.zheha.poki", "name": "Poki"]]) }
+            return (200, ["value": .null])
+        }
+        wda.set("POST /wda/apps/activate") { [wda] _ in
+            wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.mobilemail", "name": "Mail"]]) }
+            return (200, ["value": .null])
+        }
+        let result = await core.call("do", ["actions": [["tap": 1]]])
+        XCTAssertTrue(result.text.hasPrefix("app: Mail"), result.text)
+        XCTAssertTrue(result.text.contains("note: Poki was in front after the actions"), result.text)
+        XCTAssertTrue(result.text.contains("Mail was brought back"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/apps/activate").first?["bundleId"]?.string, "com.apple.mobilemail")
+        // Working in Poki on purpose is left alone.
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "nz.zheha.poki", "name": "Poki"]]) }
+        _ = await core.call("look", [:])
+        let inPoki = await core.call("do", ["actions": [["tap": [100, 300]]]])
+        XCTAssertFalse(inPoki.text.contains("brought back"), inPoki.text)
+        XCTAssertEqual(wda.bodies("POST /wda/apps/activate").count, 1)
+    }
+}

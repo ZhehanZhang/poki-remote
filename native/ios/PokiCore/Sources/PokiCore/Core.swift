@@ -22,8 +22,11 @@ public struct CoreConfig: Sendable {
     /// read of Settings took 0.2 to 0.4 s against 0.6 to 0.7 s, and 0.3 s against 2.0 s with the
     /// keyboard up.
     public var treeFormat: String
+    /// Poki's own bundle id: a tap that lands on its Live Activity (the Dynamic Island) brings it to the
+    /// front; `do` brings the app it was working in back and says so, rather than act inside Poki.
+    public var ownBundleID: String
 
-    public init(relayURL: URL = URL(string: "wss://pokimcp.zheha.nz/v1")!, runnerURL: URL = URL(string: "http://127.0.0.1:8100")!, sensitive: SensitivityRules = SensitivityRules(), approvalWait: Double = 20, toolDeadline: Double = 25, actionCap: Double = 6, readTimeout: Double = 4, busyWait: Double = 2, runnerWait: Double = 15, treeFormat: String = "xml") {
+    public init(relayURL: URL = URL(string: "wss://pokimcp.zheha.nz/v1")!, runnerURL: URL = URL(string: "http://127.0.0.1:8100")!, sensitive: SensitivityRules = SensitivityRules(), approvalWait: Double = 20, toolDeadline: Double = 25, actionCap: Double = 6, readTimeout: Double = 4, busyWait: Double = 2, runnerWait: Double = 15, treeFormat: String = "xml", ownBundleID: String = "nz.zheha.poki") {
         self.relayURL = relayURL
         self.runnerURL = runnerURL
         self.sensitive = sensitive
@@ -34,6 +37,7 @@ public struct CoreConfig: Sendable {
         self.busyWait = busyWait
         self.runnerWait = runnerWait
         self.treeFormat = treeFormat
+        self.ownBundleID = ownBundleID
     }
 }
 
@@ -274,7 +278,8 @@ public final class PokiCore: @unchecked Sendable {
         gate.current = "\(name): \(activity.summary)"
         emit(.toolStarted(activity))
         // The owner's time on an approval comes on top of the tool's own time.
-        let deadline = config.toolDeadline + (name == "do" ? config.approvalWait : 0) + 1
+        // The owner's time on an approval, and the runner's start, come on top of the tool's own time.
+        let deadline = config.toolDeadline + (name == "do" ? config.approvalWait : 0) + config.runnerWait + 1
         let output: ToolResult
         do {
             output = try await withDeadline(deadline, name) { [computer] in

@@ -308,6 +308,14 @@ final class Computer: @unchecked Sendable {
             return await readAndReply(until: until, full: true, error: "element \(stale.map(String.init).joined(separator: ", ")) is not in the latest read; nothing was sent. The current elements are below.")
         }
 
+        // The runner's start and the checks above are not the actions' time (seen on the phone: a
+        // launch sent while the runner was starting had its 9 s used up before it went).
+        let prepared = now()
+        until += prepared - started
+        started = prepared
+        let before = lastForeground
+        var extra: [String] = []
+
         // Approval: from the first action that needs it, nothing is sent until the owner approves it
         // on the phone. The actions before it are plain and go first (seen on the phone: a last
         // selection tap held back with the Delete after it was never made, so the Delete, once
@@ -342,6 +350,8 @@ final class Computer: @unchecked Sendable {
                 let waited = now() - asked
                 until += waited
                 started += waited
+                // The owner's approval can open Poki: the app comes back before anything is sent into Poki.
+                if let back = await bringBack(from: before, why: "after the approval", check: true) { extra.append(back) }
                 let sentFirst = at > 0 ? " Actions 1 to \(at) were sent (below)." : ""
                 let again = at > 0 ? "send action \(at + 1)\(tail.count > 1 ? " to \(actions.count)" : "") again, on their own" : "send the same actions again"
                 switch outcome {
@@ -370,12 +380,35 @@ final class Computer: @unchecked Sendable {
                 did.append("paused \(Int((pause * 1000).rounded())) ms before reading")
             }
         }
-        return await readAndReply(until: until, full: full, changes: true, did: did, error: error, extra: approvedNote.map { [$0] } ?? [])
+        let result = await readAndReply(until: until, full: full, changes: true, did: did, error: error, extra: (approvedNote.map { [$0] } ?? []) + extra)
+        // The read shows Poki in front where another app was being worked in: a tap at the top of
+        // the screen landed on Poki's Live Activity in the Dynamic Island. The app comes back and
+        // the read is made again, so the model never sees (or acts in) Poki's own screen.
+        if lastForeground?.bundleID == config.ownBundleID, !toRun.contains(where: { $0["launch"] != nil }), until - now() > config.readTimeout + 1,
+           let back = await bringBack(from: before, why: "after the actions (a tap near the top of the screen lands on Poki's Live Activity in the Dynamic Island)", check: false) {
+            return await readAndReply(until: until, full: full, changes: true, did: did, error: error, extra: (approvedNote.map { [$0] } ?? []) + extra + [back])
+        }
+        return result
     }
 
-    /// The actions, in order, each within the action time (`actionCap` from `started`; a launch gets
-    /// 9 s, the time XCTest's launch handshake takes on the phone) and the call's deadline. Stops at
-    /// the first that fails.
+    /// When Poki itself is in front although the model was working in another app, that app is
+    /// activated again, and the line says so. nil when nothing had to be done.
+    func bringBack(from before: Foreground?, why: String, check: Bool) async -> String? {
+        guard let app = before?.bundleID, app != config.ownBundleID else { return nil }
+        if check {
+            guard let front = try? await runner.call("GET", "/wda/activeAppInfo", timeout: 1.5), front["bundleId"]?.string == config.ownBundleID else { return nil }
+        }
+        do {
+            _ = try await runner.call("POST", "/wda/apps/activate", ["bundleId": .string(app)], timeout: 4)
+            return "note: Poki was in front \(why); \(before?.describe ?? app) was brought back. Nothing was sent into Poki."
+        } catch {
+            return "note: Poki was in front \(why), and \(before?.describe ?? app) could not be brought back (\(error)). Launch it, or ask the owner."
+        }
+    }
+
+    /// The actions, in order, each within its own action time (`actionCap` from when it starts; a
+    /// launch gets 9 s, the time XCTest's launch handshake takes on the phone) and the call's
+    /// deadline. Stops at the first that fails.
     func run(_ actions: [JSON], started: Double, until: Double, numberedFrom offset: Int = 0) async -> (did: [String], error: String?, lastKind: String?) {
         var did: [String] = []
         var error: String?
@@ -383,10 +416,10 @@ final class Computer: @unchecked Sendable {
         for (i, action) in actions.enumerated() {
             let index = offset + i
             let cap = action["launch"] != nil ? max(config.actionCap, 9) : config.actionCap
-            let actionsUntil = min(until - config.readTimeout - 0.5, started + cap)
+            let actionsUntil = min(until - config.readTimeout - 0.5, now() + cap)
             let left = actionsUntil - now()
             if left < 0.3 {
-                error = "stopped before action \(index + 1): the \(Int(cap)) s action time ran out; nothing more was sent"
+                error = "stopped before action \(index + 1): the call's time ran out (\(Int(config.toolDeadline)) s for all the actions and the read); nothing more was sent"
                 break
             }
             let began = now()
