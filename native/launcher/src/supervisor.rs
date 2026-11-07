@@ -36,6 +36,9 @@ pub struct Config {
 
 /// The longest a disk image mount may take (Apple's signing server plus the upload).
 const DDI_MOUNT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a launch may take: iOS asks for the passcode before the first UI automation after a
+/// restart, and the owner may be away from the phone for a while.
+const PASSCODE_WAIT: Duration = Duration::from_secs(300);
 
 fn default_address() -> IpAddr {
     IpAddr::from([10, 7, 0, 1])
@@ -221,7 +224,10 @@ impl Launcher {
         let bundle = launch::find_runner(&mut device, config.runner_bundle.as_deref()).await?;
         let mut session = launch::start(&mut device, &bundle, &ios).await?;
         let wda = SocketAddr::new(config.wda_host, config.wda_port);
-        launch::wait_ready(&mut session, wda, Duration::from_secs(60)).await?;
+        launch::wait_ready(&mut session, wda, PASSCODE_WAIT, Duration::from_secs(12), || {
+            me.set("launching", attempt, json!({"pairing": kind, "ios": ios, "code": "passcode",
+                "detail": "the runner has not answered for 12 s: iOS is probably asking for the passcode on the phone (once after a restart or a force quit); waiting up to 5 min"}));
+        }).await?;
         me.set("running", attempt, json!({"pairing": kind, "ios": ios, "runner": bundle}));
 
         // Watch: a missed /status twice in a row, an ended session, or a restart command ends it.
