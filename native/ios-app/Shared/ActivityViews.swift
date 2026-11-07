@@ -176,6 +176,7 @@ struct LockScreenView: View {
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .tapShield()
     }
 }
 
@@ -243,7 +244,7 @@ struct ActivityRunCard: View {
                 if let detail = state.detailLine {
                     DetailLine(state: state, text: detail).padding(.top, 3)
                 }
-                if tall || state.phase == .problem {
+                if tall {
                     Spacer(minLength: 8)
                     Footer(state: state)
                 }
@@ -298,9 +299,6 @@ struct Footer: View {
                     Meta(symbol: "clock", text: end.formatted(date: .omitted, time: .shortened))
                 }
                 Spacer(minLength: 4)
-            case .problem:
-                Spacer(minLength: 0)
-                OpenPokiButton()
             default:
                 Spacer(minLength: 0)
             }
@@ -350,18 +348,6 @@ struct StopButton: View {
             .background(.white.opacity(0.16), in: .capsule)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .fixedSize()
-    }
-}
-
-struct OpenPokiButton: View {
-    var body: some View {
-        Link(destination: URL(string: "poki://home")!) {
-            Text("Open Poki").font(.system(size: 13, weight: .semibold))
-                .padding(.horizontal, 12).frame(height: 28)
-                .background(.white.opacity(0.16), in: .capsule)
-        }
         .foregroundStyle(.white)
         .fixedSize()
     }
@@ -628,6 +614,7 @@ struct IslandLeading: View {
             .lineLimit(1)
         }
         .frame(maxHeight: .infinity, alignment: .center)
+        .tapShield()
     }
 }
 
@@ -654,6 +641,7 @@ struct IslandTrailing: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .center)
+        .tapShield()
     }
 }
 
@@ -673,6 +661,7 @@ struct IslandBottom: View {
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .tapShield()
     }
 }
 
@@ -690,11 +679,7 @@ struct IslandSmall: View {
                 if let detail = state.detailLine { DetailLine(state: state, text: detail) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            switch state.phase {
-            case .working: StopButton()
-            case .problem: OpenPokiButton()
-            default: EmptyView()
-            }
+            if state.phase == .working { StopButton() }
         }
     }
 }
@@ -773,6 +758,23 @@ struct MinimalView: View {
 }
 
 // MARK: Pieces
+
+/// Lays NoTapIntent under a view, so a tap on it is swallowed instead of opening Poki (the owner's
+/// rule: the Live Activity never pulls the person into the app). Controls on top keep their taps.
+/// There is no Link and no widgetURL anywhere in the activity.
+struct TapShield: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background {
+            Button(intent: NoTapIntent()) { Color.black.opacity(0.001) }
+                .buttonStyle(.plain)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    func tapShield() -> some View { modifier(TapShield()) }
+}
 
 /// The bear on its blue tile, like the app icon, inset so no part of it is clipped.
 struct BearMark: View {

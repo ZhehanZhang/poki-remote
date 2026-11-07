@@ -67,6 +67,17 @@ struct HandoffDoneIntent: LiveActivityIntent {
     }
 }
 
+/// Swallows a tap on the Live Activity's plain areas. iOS opens the activity's app on any tap that no
+/// control takes; this intent, laid under every surface (see TapShield), takes it instead and does
+/// nothing, so the agent's run is never interrupted by Poki coming to the front. Poki's own buttons
+/// sit above it and still work.
+struct NoTapIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "Nothing"
+    static let isDiscoverable = false
+    init() {}
+    func perform() async throws -> some IntentResult { .result() }
+}
+
 /// Decisions in flight between the intent and the app.
 enum ApprovalMailbox {
     static let notification = "nz.zheha.poki.approval"
