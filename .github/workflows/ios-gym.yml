@@ -1,5 +1,8 @@
 # Builds Poki Gym (native/ios-gym) for the iOS Simulator and opens every scenario once, with a
-# screenshot of each, so the app that the look/do scenarios run against is known to work.
+# screenshot of each, so the app that the look/do scenarios run against is known to work. Then the
+# scorecard job runs PokiCore's look/do (dev/ios-core) through every scenario and a few faults against
+# a real WebDriverAgent on the simulator, and fails on any call that hangs, comes without a picture,
+# misses its budget or does not move the screen.
 name: iOS gym
 
 on:
@@ -7,6 +10,7 @@ on:
   push:
     branches: [dev/ios-gym, dev/ios-app]
     paths: [native/ios-gym/**, .github/workflows/ios-gym.yml]
+  workflow_call:
 
 permissions:
   contents: read
@@ -56,3 +60,89 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: gym-shots, path: shots }
+
+  scorecard:
+    needs: gym
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      WDA_COMMIT: 02cb92f0e93c8b021443bcbb8eeb80932c113220
+      CORE_BRANCH: dev/ios-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: PokiGym-simulator, path: build }
+      - name: PokiCore (the MCP, from its own branch) with the gym driver as one more executable
+        run: |
+          git init -q build/core
+          git -C build/core fetch -q --depth 1 "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" "$CORE_BRANCH"
+          git -C build/core checkout -q FETCH_HEAD
+          echo "PokiCore at $(git -C build/core rev-parse --short HEAD)"
+          mkdir -p build/core/native/ios/PokiCore/Sources/poki-gym-check
+          cp native/ios-gym/check/main.swift build/core/native/ios/PokiCore/Sources/poki-gym-check/main.swift
+          python3 - <<'PY'
+          p = 'build/core/native/ios/PokiCore/Package.swift'
+          s = open(p).read()
+          s = s.replace('.executableTarget(name: "poki-sim-check", dependencies: ["PokiCore"]),', '.executableTarget(name: "poki-sim-check", dependencies: ["PokiCore"]),\n        .executableTarget(name: "poki-gym-check", dependencies: ["PokiCore"]),')
+          assert 'poki-gym-check' in s
+          open(p, 'w').write(s)
+          PY
+      - name: WebDriverAgent (the runner's pinned version)
+        run: |
+          git init -q build/wda
+          git -C build/wda fetch -q --depth 1 https://github.com/appium/WebDriverAgent "$WDA_COMMIT"
+          git -C build/wda checkout -q FETCH_HEAD
+      - name: Boot a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)['devices']
+          sdk = tuple(int(v) for v in sys.argv[1].split('.'))
+          def version(r): return tuple(int(v) for v in r.rsplit('iOS-', 1)[1].split('-'))
+          runtimes = sorted((r for r in d if 'iOS-' in r and version(r) <= sdk), key=version, reverse=True)
+          phones = [x for r in runtimes for x in d[r] if x['name'].startswith('iPhone')]
+          pro = [x for x in phones if 'Pro' in x['name'] and 'Max' not in x['name']]
+          print((pro or phones)[0]['udid'])" "$(xcrun --sdk iphonesimulator --show-sdk-version)")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          prefs="$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data/Library/Preferences"
+          mkdir -p "$prefs"
+          for domain in com.apple.Preferences com.apple.keyboard.preferences; do
+            defaults write "$prefs/$domain" DidShowContinuousPathIntroduction -bool true
+            defaults write "$prefs/$domain" KeyboardContinuousPathEnabled -bool false
+          done
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          (cd build && unzip -oq PokiGym.app.zip)
+          xcrun simctl install "$UDID" build/PokiGym.app
+      - name: Build WebDriverAgent for the simulator
+        run: xcodebuild -project build/wda/WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination "id=$UDID" -derivedDataPath build/wda-dd build-for-testing -quiet
+      - name: Start WebDriverAgent (and keep the start script for the runner-killed fault)
+        run: |
+          cat > build/start-wda.sh <<EOS
+          #!/bin/bash
+          cd "$GITHUB_WORKSPACE"
+          nohup xcodebuild -project build/wda/WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination "id=$UDID" -derivedDataPath build/wda-dd test-without-building >> build/wda.log 2>&1 &
+          for i in \$(seq 1 150); do curl -sf http://127.0.0.1:8100/status > /dev/null && echo "WDA up after \$((i * 2)) s" && exit 0; sleep 2; done
+          echo "WDA did not come up"; exit 1
+          EOS
+          chmod +x build/start-wda.sh
+          build/start-wda.sh || { tail -50 build/wda.log; exit 1; }
+      - name: Scorecard
+        working-directory: build/core/native/ios/PokiCore
+        run: |
+          set -o pipefail
+          POKI_PICTURES="$GITHUB_WORKSPACE/build/gym-pictures" POKI_WDA_START="$GITHUB_WORKSPACE/build/start-wda.sh" \
+            swift run -c release poki-gym-check 2>&1 | tee "$GITHUB_WORKSPACE/build/gym-scorecard.txt"
+      - name: Summary
+        if: always()
+        run: |
+          { echo "## Poki Gym scorecard (PokiCore $(git -C build/core rev-parse --short HEAD))"; echo; sed -n '/^| scenario/,$p' build/gym-scorecard.txt 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY"
+          tail -30 build/wda.log 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gym-scorecard
+          path: |
+            build/gym-scorecard.txt
+            build/wda.log
+            build/gym-pictures

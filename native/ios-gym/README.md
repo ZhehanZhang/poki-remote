@@ -23,3 +23,12 @@ can tell where it is and what its last action did from the tree alone.
 
 `.github/workflows/ios-gym.yml` builds the simulator app (artifact `PokiGym-simulator`) and opens
 each screen once.
+
+## Scorecard
+
+`check/main.swift` is the gym driver: in CI (`.github/workflows/ios-gym.yml`, job `scorecard`) it is
+built as one more executable of the PokiCore package from `dev/ios-core` and drives look/do through
+every scenario and three faults (a look during a long action, the runner killed and restarted, a
+scroll_to for text that is not there). A run fails on any call that hangs, answers without a
+picture, misses its budget, or does not move the screen. The table lands in the job summary and in
+the `gym-scorecard` artifact with every picture the agent would have seen.
