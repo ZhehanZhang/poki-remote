@@ -482,11 +482,21 @@ extension Computer {
         // again rather than being told that something unknown may have happened.
         var all = lastAll, swipes = 0, last: String?
         func found(_ e: Element) -> String { "\(swipes) swipes, found at \(e.frame.described)" }
+        func notYet(_ why: String) -> String { "\(swipes) swipes, \(wanted) not seen yet; \(why): call scroll_to again to go on from here" }
         while hit(all) == nil, swipes < max {
-            guard until - now() > 1.6 else {
-                return "\(swipes) swipes, \(wanted) not seen yet; the action's time ran out before the list was through (\(Int(Self.scrollCap)) s): call scroll_to again to go on from here"
+            guard until - now() > 1.6 else { return notYet("the action's time ran out before the list was through (\(Int(Self.scrollCap)) s)") }
+            // A swipe sent while the runner is still serving the read after the last one would only
+            // queue behind it and time out, and the whole scroll would come back unknown (seen in
+            // the gym on 300 rows): the runner is waited for, and a swipe the runner did not confirm
+            // ends the scroll with its progress, never with an unknown.
+            if runner.busyWith != nil, await !runner.waitUntilFree(timeout: Swift.max(0.3, Swift.min(2, until - now() - 1.6))) {
+                return notYet("the runner is still finishing the read after the last swipe")
             }
-            try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.8)
+            do {
+                try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.8)
+            } catch let e as RunnerError where e.delivery == .unknown {
+                return notYet("the runner did not confirm the last swipe in time (\(e.message)), so it may still land")
+            }
             swipes += 1
             await sleep(seconds: 0.1)
             guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { continue }
@@ -496,7 +506,7 @@ extension Computer {
             all = seen.elements
         }
         if let e = hit(all) { return found(e) }
-        return "\(swipes) swipes, \(wanted) not seen yet within \(max) swipes: call scroll_to again to go on (max_swipes takes up to 15)"
+        return notYet("that is \(max) swipes (max_swipes takes up to 15)")
     }
 
     /// The time one scroll_to may take: more than an action, since it reports where it got to.

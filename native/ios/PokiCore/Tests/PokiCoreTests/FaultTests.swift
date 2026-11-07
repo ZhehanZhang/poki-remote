@@ -890,4 +890,31 @@ final class GymTests: XCTestCase {
         XCTAssertGreaterThan(Date().timeIntervalSince(started), 3.5, "four 1 s swipes outlast the 3 s action cap: scroll_to has 12 s")
         XCTAssertTrue(wda.bodies("POST /wda/pressAndDragWithVelocity").allSatisfy { $0["holdDuration"]?.double == 0.05 })
     }
+
+    /// 300 rows in the gym: a swipe sent while the runner was still serving the read after the last
+    /// one queued behind it, timed out, and the whole scroll came back unknown. Now the runner is
+    /// waited for, and a swipe it did not confirm ends the scroll with its progress.
+    func testScrollToNeverEndsUnknownWhenTheRunnerFallsBehind() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3; $0.toolDeadline = 20; $0.readTimeout = 0.5 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            let n = swipes.update { $0 += 1; return $0 }
+            if n == 2 { try await Task.sleep(nanoseconds: 9_000_000_000) }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        let result = await core.call("do", ["actions": [["scroll_to": "Row 250"]]])
+        XCTAssertFalse(result.text.contains("unknown"), result.text)
+        XCTAssertTrue(result.text.contains("1 swipes, \"Row 250\" not seen yet; the runner did not confirm the last swipe in time"), result.text)
+        XCTAssertTrue(result.text.contains("(sent,"), result.text)
+
+        // A read the runner is still serving: the next scroll_to waits for it, and says so when it is not through.
+        wda.set("POST /wda/pressAndDragWithVelocity") { _ in (200, ["value": .null]) }
+        wda.delay("GET /source", 6)
+        wda.delay("GET /wda/activeAppInfo", 6)
+        _ = await core.call("look", [:])
+        let again = await core.call("do", ["actions": [["scroll_to": "Row 250"]]])
+        XCTAssertTrue(again.text.contains("not_sent") || again.text.contains("still finishing"), again.text)
+    }
 }

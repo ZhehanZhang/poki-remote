@@ -390,7 +390,12 @@ Each answer is facts only: the app in front, numbered elements, what each action
   6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
   blind swipe can carry the target past the screen; an element search on the runner is a full
   snapshot too, no faster: seen in the gym, where the gesture itself is most of a swipe's 2.5-3 s).
-  Up to 12 swipes per call (`max_swipes` up to 15). When under 1.6 s is left it stops where it is: `4 swipes, "Row 250" not
+  Up to 12 swipes per call (`max_swipes` up to 15). A swipe is never sent while the runner is still
+  serving the read after the last one (it would queue, time out, and make the whole scroll
+  unknown: seen in the gym on 300 rows): the runner is waited for, up to 2 s, and a swipe the
+  runner did not confirm in time ends the scroll with its progress (`1 swipes, "Row 250" not seen
+  yet; the runner did not confirm the last swipe in time (…), so it may still land: call scroll_to
+  again`), never with an unknown. When under 1.6 s is left it stops where it is: `4 swipes, "Row 250" not
   seen yet; the action's time ran out before the list was through (12 s): call scroll_to again to
   go on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
   that stops moving says "its end, or the text is not in it"; the swipe limit reached says to call
