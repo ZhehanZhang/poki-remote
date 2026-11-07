@@ -1,3 +1,4 @@
+import PokiCore
 import SwiftUI
 import UIKit
 
@@ -223,6 +224,13 @@ final class AppModel {
                     self.log.add("runner", "ended \(second) s after Stop")
                     self.clearStuckNotice()
                     return
+                }
+                // Still up: the shutdown may have queued behind a long read in the runner, or the
+                // developer connection the launcher kills through was gone. Ask again.
+                if second == 4 || second == 12 || second == 20 {
+                    self.log.add("runner", "still answering \(second) s after Stop: asking again")
+                    await RunnerProbe.shutdown()
+                    self.launcher.stop()
                 }
                 if second == 10 {
                     self.log.add("runner", "still answering 10 s after Stop")
