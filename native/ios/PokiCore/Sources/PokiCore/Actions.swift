@@ -540,20 +540,28 @@ extension Computer {
         let limit = Swift.min(started + Swift.min(10, Swift.max(0.2, (spec["ms"]?.double ?? 3000) / 1000)), until)
         let screen = size ?? ScreenSize(width: 10_000, height: 10_000)
         let what = settled && text == nil ? "the screen held still" : "\"\(text!.prefix(40))\" \(gone ? "was gone" : "appeared")"
-        var last: String?
+        func signature(_ elements: [Element]) -> String { elements.map { "\($0.key)@\($0.frame.described)" }.joined(separator: ";") }
+        // "Settled" compares two reads. The latest read, when it is fresh (the call before ended
+        // within 5 s), is the first: on a slow runner (the CI simulator read in 4.5 s) two reads
+        // do not fit an action's time, and the screen that matches the read before held still.
+        var last: String? = settled && text == nil && lastTreeAt.map({ now() - $0 < 5 }) == true ? signature(lastElements) : nil
         var reads = 0
-        // A read takes as long as the runner needs (up to readTimeout, within the call's deadline), not
-        // the window: a phone that reads in 2.5 s still gets its answer. "Settled" compares two reads,
-        // so it gets a second one past the window when the deadline leaves room for it.
-        while now() < limit || (settled && text == nil && reads == 1 && until - now() > 1) {
-            if let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(config.readTimeout, until - now() - 0.3)), format: config.treeFormat) {
+        // A read takes as long as the runner needs (up to readTimeout, within the action's time),
+        // not the window: a phone that reads in 2.5 s still gets its answer. "Settled" gets a second
+        // read past the window when the time leaves room for one. The request's own margin (0.5 s
+        // past its timeout) stays inside the action's time, so the action answers for itself and
+        // never runs out as "unknown".
+        while now() < limit || (settled && text == nil && reads == 1 && until - now() > 1.5) {
+            let room = until - now() - 0.9
+            guard room >= 0.3 else { break }
+            if let seen = try? await runner.tree(timeout: Swift.min(config.readTimeout, room), format: config.treeFormat) {
                 reads += 1
                 let elements = listable(seen.elements, screen)
                 let ms = Int(((now() - started) * 1000).rounded())
                 if settled && text == nil {
-                    let signature = elements.map { "\($0.key)@\($0.frame.described)" }.joined(separator: ";")
-                    if signature == last { return "wait_until: \(what) after \(ms) ms" }
-                    last = signature
+                    let sig = signature(elements)
+                    if sig == last { return "wait_until: \(what) after \(ms) ms" }
+                    last = sig
                 } else if let text {
                     let present = elements.contains { $0.text.lowercased().contains(text.lowercased()) }
                     if present != gone { return "wait_until: \(what) after \(ms) ms" }
