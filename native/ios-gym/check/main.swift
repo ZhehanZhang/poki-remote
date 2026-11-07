@@ -165,7 +165,8 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
     var answer = ""
     for i in 1...max {
         answer = await call(i == 1 ? step : "\(step) (again, \(i))", "do", ["actions": [["scroll_to": .string(text)]]], budget: budget)
-        if !(answer.contains("not seen yet") && answer.contains("call scroll_to again")) { break }
+        if answer.contains("found at") { break }
+        if !(answer.contains("call scroll_to again") || answer.contains("may have been delivered")) { break }
     }
     return answer
 }
@@ -276,7 +277,7 @@ if let raw = try? await URLSession.shared.data(from: url.appendingPathComponent(
 }
 // The web view's parts reach the tree a few seconds after the page loads; PokiCore says so and
 // the agent reads again, as here (up to four times, a second apart).
-for i in 1...4 where ref(in: a, "Open") == nil {
+for i in 1...8 where ref(in: a, "Open") == nil {
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     a = await call("look again at the web view (\(i))", "look")
 }
