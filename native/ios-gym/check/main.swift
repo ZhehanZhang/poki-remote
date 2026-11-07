@@ -29,9 +29,12 @@ final class Host: CoreHost, @unchecked Sendable {
     /// picture that a wedged app cannot block.
     func screenshotWithoutRunner() async -> Data? {
         let path = NSTemporaryDirectory() + "poki-gym-\(UUID().uuidString).png"
+        let began = Date()
         sh(["xcrun", "simctl", "io", udid, "screenshot", path])
         defer { try? FileManager.default.removeItem(atPath: path) }
-        return FileManager.default.contents(atPath: path)
+        let data = FileManager.default.contents(atPath: path)
+        print("host: simctl screenshot \(data.map { "\($0.count / 1024) KB" } ?? "nothing") in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
+        return data
     }
     /// As the app's launcher: PokiCore asks once the runner stops answering; the start script brings
     /// WebDriverAgent back (POKI_WDA_START), at most once every 20 s.
