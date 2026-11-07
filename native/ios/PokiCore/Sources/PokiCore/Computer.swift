@@ -495,7 +495,7 @@ final class Computer: @unchecked Sendable {
         for (i, action) in actions.enumerated() {
             let index = offset + i
             // A launch gets 9 s; a fresh one (the app ended first, up to 6 s on its own) 14 s.
-            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : config.actionCap
+            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : action["scroll_to"] != nil ? max(config.actionCap, Self.scrollCap) : config.actionCap
             let actionsUntil = min(until - config.readTimeout - 0.5, now() + cap)
             let left = actionsUntil - now()
             if left < 0.3 {

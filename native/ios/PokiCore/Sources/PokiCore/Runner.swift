@@ -100,7 +100,7 @@ struct SnapshotLimits: Equatable, Sendable {
     var caveat: String {
         var parts: [String] = []
         if depth < 50 { parts.append("deeper parts of nested elements may be missing") }
-        if children != Self.full.children { parts.append("a long list shows its first \(children) rows only (scroll_to finds the rest)") }
+        if children != Self.full.children { parts.append("only the first \(children) children of each element are listed (the end of a long list, and anything an app put after it, is not; scroll_to finds what is further down)") }
         return parts.joined(separator: "; ")
     }
 }

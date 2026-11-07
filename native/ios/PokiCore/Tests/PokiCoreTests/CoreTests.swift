@@ -126,8 +126,7 @@ final class ToolTests: XCTestCase {
 
     func testTypingClearsWithDeletesInOneRequest() async {
         let (core, wda, _) = makeCore()
-        wda.set("GET /element/active") { _ in (200, ["value": ["ELEMENT": "e1"]]) }
-        wda.set("GET /element/e1/attribute/value") { _ in (200, ["value": "abc"]) }
+        wda.tree([Node("TextField", nil, [16, 100, 358, 44], value: "abc"), Node("Keyboard", nil, [0, 500, 390, 344])], app: "Notes")
         _ = await core.call("look", [:])
         _ = await core.call("do", ["actions": [["type": "hi", "clear": true]]])
         XCTAssertEqual(wda.bodies("POST /wda/keys").last, ["value": ["\u{8}", "\u{8}", "\u{8}", "h", "i"]])

@@ -143,6 +143,7 @@ extension Computer {
             return ("tap", "tap \(describe(action))\(offCentre(spec, p))\(fillsScreen(spec, p))\(container(spec))")
         }
         if let text = action["type"]?.text {
+            let target: Element? = try action["ref"]?.int.map(element)
             if let ref = action["ref"] {
                 try await tap(try point(ref))
             }
@@ -150,19 +151,19 @@ extension Computer {
             // text typed right after the tap went nowhere). Wait for a field to be focused, up to
             // 2 s, then type anyway and say when none was.
             let focusWait = min(2, max(0.2, until - now() - 1))
-            let focused = await waitForFocus(seconds: focusWait)
-            let focusNote = focused ? "" : "; no field was focused when the text went (waited \(Int((focusWait * 1000).rounded())) ms), so it may have gone nowhere"
+            let focused = await waitForFocus(seconds: focusWait, target: target)
+            let focusNote = focused ? "" : "; no field was focused when the text went (no keyboard came up in \(Int((focusWait * 1000).rounded())) ms), so it may have gone nowhere"
             let hidden = describe(action).hasSuffix("(hidden)")
             let via = action["via"]?.string == "paste" ? "pasted" : "typed"
             let clear = action["clear"]?.bool ?? false
             var note = ""
             if via == "pasted" {
-                note = try await paste(text, clear: clear, until: until)
+                note = try await paste(text, clear: clear, until: until, target: target)
             } else {
-                note = try await type(text, clear: clear, hidden: hidden)
+                note = try await type(text, clear: clear, hidden: hidden, target: target)
             }
             // What the field holds now, so the model sees at once whether the text arrived whole.
-            let reads = await fieldValue(timeout: min(1.5, max(0.3, until - now() - 0.2)))
+            let reads = await fieldValue(target: target, holding: text, timeout: min(1.5, max(0.3, until - now() - 0.2)))
             let readBack = reads.map { hidden ? "; the field now holds \($0.count) characters" : "; the field now reads \"\($0.count > 200 ? String($0.prefix(190)) + "…" : $0)\"" }
                 ?? "; the field could not be read back (no focused field answered in time), so check the elements or the picture"
             return ("type", "\(describe(action)) (\(via))\(readBack)\(focusNote)\(note)")
@@ -294,36 +295,58 @@ extension Computer {
     /// cleared through WDA's element clear once (bounded at 3 s) and the text typed again; the
     /// answer says what happened. Returns a note for the answer.
     @discardableResult
-    func type(_ text: String, clear: Bool, hidden: Bool = false) async throws -> String {
+    func type(_ text: String, clear: Bool, hidden: Bool = false, target: Element? = nil) async throws -> String {
         var deletes = 0
-        var before: (id: String, value: String?)?
+        var before: String?
         if clear {
-            before = await focusedField(timeout: 2)
-            if let s = before?.value { deletes = min(400, s.count) }
+            before = await fieldValue(target: target, timeout: 1.5)
+            if let s = before { deletes = min(400, s.count) }
         }
         let keys = Array(repeating: "\u{8}", count: deletes) + text.map(String.init)
         guard keys.count <= 2000 else { throw ActionFailure(message: "at most 2000 characters at a time", delivery: .notSent) }
         _ = try await runner.call("POST", "/wda/keys", ["value": .array(keys.map(JSON.string))], timeout: 3 + 0.06 * Double(keys.count))
-        guard clear, let id = before?.id else { return "" }
-        guard let after = await fieldValue(timeout: 1), after != text, !after.isEmpty, after != (before?.value ?? "") || before?.value == nil else { return "" }
-        // Something is left that the deletes did not remove: clear the element itself, then type again.
-        let cleared = (try? await runner.call("POST", "/element/\(id)/clear", [:], timeout: 3, countsAsMiss: false)) != nil
-        guard cleared else { return "; clear: the field still held \(hidden ? "\(after.count) characters" : "\"\(after.prefix(60))\"") after \(deletes) deletes, and the runner could not clear it in 3 s" }
-        _ = try await runner.call("POST", "/wda/keys", ["value": .array(text.map { .string(String($0)) })], timeout: 3 + 0.06 * Double(text.count))
-        return "; clear: the field still held \(hidden ? "\(after.count) characters" : "\"\(after.prefix(60))\"") after \(deletes) deletes, so it was cleared again and the text typed again"
+        guard clear, before != nil else { return "" }
+        guard let after = await fieldValue(target: target, holding: text, timeout: 1), after != text, !after.isEmpty, after != before else { return "" }
+        // Something is left that the deletes did not remove (the cursor was not at the end): as many
+        // deletes as the field holds now, and the text again. No element clear: WDA's retries until
+        // the value is empty, which some fields never report (Safari's address bar took 25 s).
+        let again = Array(repeating: "\u{8}", count: min(400, after.count)) + text.map(String.init)
+        _ = try await runner.call("POST", "/wda/keys", ["value": .array(again.map(JSON.string))], timeout: 3 + 0.06 * Double(again.count))
+        return "; clear: the field still held \(hidden ? "\(after.count) characters" : "\"\(after.prefix(60))\"") after \(deletes) deletes, so \(min(400, after.count)) more deletes and the text were sent again"
     }
 
-    /// Whether a field is focused, waiting up to `seconds` for one (polled every 150 ms).
-    func waitForFocus(seconds: Double) async -> Bool {
+    static let fieldTypes: Set<String> = ["TextField", "SecureTextField", "SearchField", "TextView"]
+
+    /// Whether a field took the focus (the keyboard is up), waiting up to `seconds` (a tree read
+    /// every 150 ms). Focus is read from the tree, never asked of the runner: WDA's focus query
+    /// (GET /element/active) is an XCTest query that hung the CI simulator's runner for 19 s on
+    /// the keyboard's first-use intro, and everything queued behind it with it; a tree read is
+    /// sessionless and bounded by the accessibility deadline.
+    func waitForFocus(seconds: Double, target: Element?) async -> Bool {
         let deadline = now() + seconds
         while true {
-            if await focusedField(timeout: 1) != nil { return true }
-            // A focus query the runner did not answer in time is still being served: another would
-            // only queue behind it (seen on the CI simulator: the keyboard's first-use intro held one
-            // GET /element/active for 19 s, and the polls behind it went down with the runner).
-            if now() >= deadline || runner.busyWith != nil { return false }
+            let seen = await fieldOnScreen(target: target, timeout: max(0.5, min(1.5, deadline - now() + 0.5)))
+            if seen.keyboard { return true }
+            if now() >= deadline || (!seen.came && runner.busyWith != nil) { return false }
             await sleep(seconds: 0.15)
         }
+    }
+
+    /// The field the text goes to, from one tree read: the field under or around the tapped target,
+    /// else the field holding `holding`, else the only field on screen. `keyboard`: the keyboard is
+    /// up; `came`: the tree was read.
+    func fieldOnScreen(target: Element?, holding: String? = nil, timeout: Double) async -> (field: Element?, keyboard: Bool, came: Bool) {
+        guard let seen = try? await runner.tree(timeout: timeout, format: config.treeFormat) else { return (nil, false, false) }
+        let all = seen.elements
+        let keyboard = all.contains { $0.type == "Keyboard" }
+        let fields = all.filter { Self.fieldTypes.contains($0.type) }
+        var field: Element?
+        if let target {
+            field = fields.first { $0.frame.contains(target.frame.centre) || target.frame.contains($0.frame.centre) }
+        }
+        if field == nil, let holding, !holding.isEmpty { field = fields.first { ($0.value ?? "").contains(holding) } }
+        if field == nil, fields.count == 1 { field = fields[0] }
+        return (field, keyboard, true)
     }
 
     /// `{back: true}`: the navigation bar's back button when the last read listed one (a button in
@@ -344,16 +367,11 @@ extension Computer {
         return "back: no back button was listed in the top left, so an edge swipe from the left was sent (what most apps take as back)"
     }
 
-    /// The focused field's id and value, or nil when nothing is focused or the runner does not say.
-    func focusedField(timeout: Double) async -> (id: String, value: String?)? {
-        guard let active = try? await runner.call("GET", "/element/active", timeout: timeout, countsAsMiss: false),
-              let id = active["ELEMENT"]?.string ?? active["element-6066-11e4-a52e-4f735466cecf"]?.string else { return nil }
-        let value = try? await runner.call("GET", "/element/\(id)/attribute/value", timeout: timeout, countsAsMiss: false)
-        return (id, value?.string)
-    }
-
-    func fieldValue(timeout: Double) async -> String? {
-        await focusedField(timeout: timeout / 2)?.value
+    /// What the field holds now (its value from the tree), or nil when no field is found or read.
+    func fieldValue(target: Element?, holding: String? = nil, timeout: Double) async -> String? {
+        let seen = await fieldOnScreen(target: target, holding: holding, timeout: timeout)
+        guard let field = seen.field else { return nil }
+        return field.value ?? ""
     }
 
     /// Words of the edit menu's Paste item in the languages iOS ships most.
@@ -367,17 +385,14 @@ extension Computer {
     /// owner's clipboard back before they answer pastes that instead (seen on the phone: the owner's
     /// own text went into a shop's search box). Returns a note for the answer.
     @discardableResult
-    func paste(_ text: String, clear: Bool, until: Double) async throws -> String {
+    func paste(_ text: String, clear: Bool, until: Double, target: Element? = nil) async throws -> String {
         let saved: JSON
         do { saved = try await runner.call("POST", "/wda/getPasteboard", ["contentType": "plaintext"], timeout: 2, countsAsMiss: false) }
         catch { throw ActionFailure(message: "the clipboard could not be read, so it was not used (the owner's clipboard would be lost); type the text instead", delivery: .notSent) }
-        guard let field = await focusedField(timeout: 1) else {
-            throw ActionFailure(message: "no field is focused to paste into; tap the field first", delivery: .notSent)
+        guard let field = await fieldOnScreen(target: target, timeout: 1.5).field else {
+            throw ActionFailure(message: "no field to paste into is listed (tap the field first, or name it with ref)", delivery: .notSent)
         }
-        let rect = try? await runner.call("GET", "/element/\(field.id)/rect", timeout: 1.5, countsAsMiss: false)
-        guard let x = rect?["x"]?.double, let y = rect?["y"]?.double, let w = rect?["width"]?.double, let h = rect?["height"]?.double else {
-            throw ActionFailure(message: "the focused field's frame is unknown, so there is nowhere to open its menu", delivery: .notSent)
-        }
+        let (x, y, w, h) = (field.frame.x, field.frame.y, field.frame.width, field.frame.height)
         var restored = false
         func restore() async {
             guard !restored else { return }
@@ -414,7 +429,7 @@ extension Computer {
             var landed = false
             while !landed, now() < landedBy {
                 await sleep(seconds: 0.25)
-                landed = await fieldValue(timeout: 0.8)?.contains(text) == true
+                landed = await fieldValue(target: target, holding: text, timeout: 0.8)?.contains(text) == true
             }
             if landed {
                 await restore()
@@ -426,7 +441,7 @@ extension Computer {
                 let giveUp = now() + 45
                 while now() < giveUp {
                     await sleep(seconds: 1)
-                    if await fieldValue(timeout: 1)?.contains(text) == true { break }
+                    if await fieldValue(target: target, holding: text, timeout: 1)?.contains(text) == true { break }
                 }
                 await restore()
             }
@@ -448,7 +463,7 @@ extension Computer {
         guard wantedKey != nil || wantedText != nil else { throw ActionFailure(message: "scroll_to takes text or ref", delivery: .notSent) }
         let region = try area(spec["in"], screen)
         let fingerGoes = ["down": "up", "up": "down", "right": "left", "left": "right"][spec["direction"]?.string ?? "down"] ?? "up"
-        let max = min(12, spec["max_swipes"]?.int ?? 10)
+        let max = min(15, spec["max_swipes"]?.int ?? 12)
         func hit(_ all: [Element]) -> Element? {
             let layout = Layout(all: all, screen: screen)
             return all.first { e in
@@ -460,34 +475,19 @@ extension Computer {
             }
         }
         let wanted = wantedText.map { "\"\($0.prefix(40))\"" } ?? "element \(spec["ref"]!.int!)"
-        // Between swipes the text is looked for with one element search on the runner (an XCTest
-        // query, no tree serialised: a fraction of a full read on a 300-row list, seen in the gym at
-        // 3 s per swipe with the tree); the tree is read once the search finds it, or when the runner
-        // has no search. Each swipe needs about 1.3 s with its search; when less is left the scroll
-        // stops where it is and says so, so the model calls it again rather than being told that
-        // something unknown may have happened.
-        var all = lastAll, swipes = 0, last: String?, searchWorks = wantedText != nil
+        // One read after each swipe: a swipe without a read can carry the target past the screen,
+        // and an element search on the runner is a full snapshot too (seen in the gym: no faster
+        // than the read). The gesture itself is most of a swipe's time, so the action has 12 s;
+        // when under 1.6 s is left the scroll stops where it is and says so, so the model calls it
+        // again rather than being told that something unknown may have happened.
+        var all = lastAll, swipes = 0, last: String?
         func found(_ e: Element) -> String { "\(swipes) swipes, found at \(e.frame.described)" }
         while hit(all) == nil, swipes < max {
-            guard until - now() > (searchWorks ? 1.3 : 2.5) else {
-                return "\(swipes) swipes, \(wanted) not seen yet; the action's time ran out before the list was through (\(Int(config.actionCap)) s): call scroll_to again to go on from here"
+            guard until - now() > 1.6 else {
+                return "\(swipes) swipes, \(wanted) not seen yet; the action's time ran out before the list was through (\(Int(Self.scrollCap)) s): call scroll_to again to go on from here"
             }
-            try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.6)
+            try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.8)
             swipes += 1
-            if searchWorks, let text = wantedText {
-                switch await search(text, timeout: Swift.max(0.3, Swift.min(1, until - now() - 0.2))) {
-                case .found:
-                    // One full read to place it (and to list the screen for the model).
-                    if let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) {
-                        all = seen.elements
-                        if let e = hit(all) { return found(e) }
-                        continue
-                    }
-                    return "\(swipes) swipes, \(wanted) is on the screen now (the runner found it); the read after the actions lists it"
-                case .absent: continue
-                case .unknown: searchWorks = false
-                }
-            }
             await sleep(seconds: 0.1)
             guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { continue }
             let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
@@ -496,23 +496,11 @@ extension Computer {
             all = seen.elements
         }
         if let e = hit(all) { return found(e) }
-        return "\(swipes) swipes, \(wanted) not seen yet within \(max) swipes: call scroll_to again to go on (max_swipes takes up to 12)"
+        return "\(swipes) swipes, \(wanted) not seen yet within \(max) swipes: call scroll_to again to go on (max_swipes takes up to 15)"
     }
 
-    enum Search { case found, absent, unknown }
-
-    /// One element search on the runner: an element whose label or value holds the text.
-    func search(_ text: String, timeout: Double) async -> Search {
-        let quoted = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        do {
-            let value = try await runner.call("POST", "/element", ["using": "predicate string", "value": .string("label CONTAINS[c] '\(quoted)' OR value CONTAINS[c] '\(quoted)'")], timeout: timeout, countsAsMiss: false)
-            return value["ELEMENT"] != nil || value["element-6066-11e4-a52e-4f735466cecf"] != nil ? .found : .absent
-        } catch let e as RunnerError where e.code == "no such element" || e.status == 404 && e.code != nil && e.code != "unknown command" {
-            return .absent
-        } catch {
-            return .unknown
-        }
-    }
+    /// The time one scroll_to may take: more than an action, since it reports where it got to.
+    static let scrollCap: Double = 12
 
     /// Reads the tree every quarter second until the text is there (or gone), or the screen holds still
     /// for two reads in a row. Not finding it is a fact, not a failure: the model decides.

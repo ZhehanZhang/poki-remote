@@ -27,7 +27,7 @@ final class FakeWDA: HTTPTransport, @unchecked Sendable {
     /// The screen as a tree: (type, label, [x, y, w, h], children).
     func tree(_ nodes: [Node], app: String = "X") {
         func json(_ n: Node) -> JSON {
-            ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
+            ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "value": n.value.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
         }
         let root: JSON = ["type": "XCUIElementTypeApplication", "label": .string(app), "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array(nodes.map(json))]
         set("GET /source") { _ in (200, ["value": root]) }
@@ -100,11 +100,13 @@ struct Node {
     var label: String?
     var frame: [Double]
     var children: [Node] = []
-    init(_ type: String, _ label: String?, _ frame: [Double], _ children: [Node] = []) {
+    var value: String?
+    init(_ type: String, _ label: String?, _ frame: [Double], _ children: [Node] = [], value: String? = nil) {
         self.type = type
         self.label = label
         self.frame = frame
         self.children = children
+        self.value = value
     }
 }
 

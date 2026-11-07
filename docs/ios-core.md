@@ -358,6 +358,18 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `do` after a restart still waited on the old runner's request). A busy, hand-off or
   "another call is running" answer that says what to do next is not an error even when the runner
   gives no picture.
+- **Focus is read from the tree, never asked of the runner.** WDA's focus query (`GET
+  /element/active`, an XCTest query for the element with keyboard focus) hung the CI simulator's
+  runner for 19 s on the keyboard's first-use intro, and every request queued behind it went down
+  with the runner (Nov 7 2026, 3:40-4:05 am ET, three runs). Typing now waits for the keyboard to
+  be listed in the tree (a sessionless read every 150 ms, up to 2 s), reads the field back from
+  the tree (the field under the tapped element, else the one holding the text, else the only one),
+  and `clear: true` re-clears with deletes, never WDA's element clear. The note when no keyboard
+  came: `no field was focused when the text went (no keyboard came up in 2000 ms), so it may have
+  gone nowhere`. Paste finds the field's frame the same way.
+- **The screenshot is asked for again when the tree came late.** A read whose tree came on its
+  second try (a runner that was busy, or restarted) but whose picture, taken beside the first
+  try, did not, asks the runner for the picture again (1.5 s) before the host's own path.
 - **A tree that times out is read again shallower within the same call.** A full-depth read that
   times out (4 s) is followed, once the runner is through with it (a queued probe answered), by a
   read with smaller snapshot limits within the call's remaining time: first at most 150 children
@@ -374,15 +386,13 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
   the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
   parts arrive 3-4 s after the page loads).
-- **A scroll that outruns the action's time says how far it got.** Between swipes `scroll_to` asks
-  the runner for one element whose label or value holds the text (`POST /element`, a predicate: an
-  XCTest query, no tree serialised) and reads the tree once it is found; a runner without the
-  search falls back to a tree read per swipe (seen in the gym: a full read after every swipe cost
-  3 s per swipe, two swipes per action, and 300 rows were never reached). Up to 10 swipes per call
-  (`max_swipes` up to 12). A swipe with its search needs about 1.3 s; when less is left it stops
-  where it is: `4 swipes, "Row 250" not
-  seen yet; the action's time ran out before the list was through (6 s): call scroll_to again to go
-  on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
+- **A scroll that outruns its time says how far it got.** `scroll_to` has 12 s (not an action's
+  6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
+  blind swipe can carry the target past the screen; an element search on the runner is a full
+  snapshot too, no faster: seen in the gym, where the gesture itself is most of a swipe's 2.5-3 s).
+  Up to 12 swipes per call (`max_swipes` up to 15). When under 1.6 s is left it stops where it is: `4 swipes, "Row 250" not
+  seen yet; the action's time ran out before the list was through (12 s): call scroll_to again to
+  go on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
   that stops moving says "its end, or the text is not in it"; the swipe limit reached says to call
   again (`max_swipes` up to 12).
 - **An answer is never lost to a relay drop.** A call keeps running when the relay connection

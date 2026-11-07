@@ -8,10 +8,22 @@ final class FaultTests: XCTestCase {
     final class Field: @unchecked Sendable {
         let value = LockedBox("")
         let clipboard = LockedBox<String?>("owner's clipboard")
+        /// The keyboard is up (a field has the focus), as the tree shows it.
+        let keyboard = LockedBox(true)
+        let menuShown = LockedBox(false)
+        /// The tree as the field's app shows it: the field with its value, the keyboard when up, and
+        /// the Paste menu once it was opened.
+        func tree() -> JSON {
+            var children: [Node] = [Node("TextField", "Note", [16, 100, 358, 44], value: value.value)]
+            if menuShown.value { children.append(Node("MenuItem", "Paste", [150, 50, 80, 40])) }
+            if keyboard.value { children.append(Node("Keyboard", nil, [0, 500, 390, 344], [Node("Button", "space", [100, 800, 190, 40])])) }
+            func json(_ n: Node) -> JSON {
+                ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "value": n.value.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
+            }
+            return ["type": "XCUIElementTypeApplication", "label": "Notes", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array(children.map(json))]
+        }
         func install(_ wda: FakeWDA, menu: Bool = true) {
-            wda.set("GET /element/active") { _ in (200, ["value": ["ELEMENT": "E1"]]) }
-            wda.set("GET /element/E1/attribute/value") { [value] _ in (200, ["value": .string(value.value)]) }
-            wda.set("GET /element/E1/rect") { _ in (200, ["value": ["x": 16, "y": 100, "width": 358, "height": 44]]) }
+            wda.set("GET /source") { [self] _ in (200, ["value": tree()]) }
             wda.set("POST /wda/keys") { [value] body in
                 for key in body?["value"]?.array ?? [] {
                     if key.string == "\u{8}" { value.update { if !$0.isEmpty { $0.removeLast() } } } else { value.update { $0 += key.string ?? "" } }
@@ -27,8 +39,8 @@ final class FaultTests: XCTestCase {
                 return (200, ["value": .null])
             }
             if menu {
-                wda.set("POST /wda/touchAndHold") { [wda] _ in
-                    wda.tree([Node("TextField", nil, [16, 100, 358, 44]), Node("MenuItem", "Paste", [150, 50, 80, 40])], app: "Notes")
+                wda.set("POST /wda/touchAndHold") { [menuShown] _ in
+                    menuShown.value = true
                     return (200, ["value": .null])
                 }
             }
@@ -579,18 +591,19 @@ final class GymTests: XCTestCase {
         let (core, wda, _) = makeCore()
         let field = FaultTests.Field()
         field.install(wda)
-        // The field focuses 0.5 s after the tap (a late-focus field).
-        let focusedAt = LockedBox<Double?>(nil)
-        wda.set("POST /wda/tap") { _ in focusedAt.value = Date().timeIntervalSince1970 + 0.5; return (200, ["value": .null]) }
-        wda.set("GET /element/active") { _ in
-            guard let at = focusedAt.value, Date().timeIntervalSince1970 >= at else { return (404, ["value": ["error": "no such element", "message": "none"]]) }
-            return (200, ["value": ["ELEMENT": "E1"]])
+        // The keyboard comes up 0.5 s after the tap (a late-focus field).
+        field.keyboard.value = false
+        wda.set("POST /wda/tap") { [keyboard = field.keyboard] _ in
+            Task { try? await Task.sleep(nanoseconds: 500_000_000); keyboard.value = true }
+            return (200, ["value": .null])
         }
         _ = await core.call("look", [:])
         let typed = await core.call("do", ["actions": [["type": "abc", "ref": 1]]])
         XCTAssertTrue(typed.text.contains("the field now reads \"abc\""), typed.text)
         XCTAssertFalse(typed.text.contains("no field was focused"), typed.text)
-        focusedAt.value = nil
+        XCTAssertFalse(wda.sent.contains("GET /element/active"), "focus is read from the tree, never asked of the runner")
+        field.keyboard.value = false
+        wda.set("POST /wda/tap") { _ in (200, ["value": .null]) }
         let none = await core.call("do", ["actions": [["type": "xyz"]]])
         XCTAssertTrue(none.text.contains("no field was focused when the text went"), none.text)
     }
@@ -605,11 +618,11 @@ final class GymTests: XCTestCase {
             for key in body?["value"]?.array ?? [] where key.string != "\u{8}" { value.update { $0 += key.string ?? "" } }
             return (200, ["value": .null])
         }
-        wda.set("POST /element/E1/clear") { [value = field.value] _ in value.value = ""; return (200, ["value": .null]) }
         _ = await core.call("look", [:])
         let typed = await core.call("do", ["actions": [["type": "new", "clear": true]]])
-        XCTAssertTrue(typed.text.contains("clear: the field still held \"old textnew\" after 8 deletes, so it was cleared again and the text typed again"), typed.text)
-        XCTAssertTrue(typed.text.contains("the field now reads \"new\""), typed.text)
+        XCTAssertTrue(typed.text.contains("clear: the field still held \"old textnew\" after 8 deletes, so 11 more deletes and the text were sent again"), typed.text)
+        XCTAssertTrue(typed.text.contains("the field now reads \"old textnewnew\""), typed.text)
+        XCTAssertEqual(wda.bodies("POST /wda/keys").count, 2)
     }
 
     func testBackTapsTheTopLeftButtonOrSwipesFromTheEdge() async {
@@ -839,7 +852,7 @@ final class GymTests: XCTestCase {
         }
         let look = await core.call("look", [:])
         XCTAssertTrue(look.text.contains("Row 1"), look.text)
-        XCTAssertTrue(look.text.contains("so it was read again with at most 150 children per element within this call; a long list shows its first 150 rows only"), look.text)
+        XCTAssertTrue(look.text.contains("so it was read again with at most 150 children per element within this call; only the first 150 children of each element are listed"), look.text)
         XCTAssertFalse(look.isError)
     }
 
@@ -859,11 +872,10 @@ final class GymTests: XCTestCase {
         XCTAssertTrue(look.text.contains("(read from the picture)"), look.text)
     }
 
-    /// The gym's 300-row list: with a full tree read after every swipe each swipe cost 3 s and two
-    /// swipes fit an action. Now one element search on the runner follows each swipe, and the tree
-    /// is read once it is found.
-    func testScrollToSearchesBetweenSwipesAndReadsTheTreeOnceFound() async {
-        let (core, wda, _) = makeCore { $0.actionCap = 6 }
+    /// The gym's 300-row list: two swipes fit the 6 s an action had. scroll_to now has 12 s, and
+    /// still reads after every swipe (a blind swipe can carry the target past the screen).
+    func testScrollToHasTwelveSecondsAndReadsAfterEverySwipe() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3; $0.toolDeadline = 20 }
         _ = await core.call("look", [:])
         let swipes = LockedBox(0)
         wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
@@ -871,14 +883,11 @@ final class GymTests: XCTestCase {
             wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
             return (200, ["value": .null])
         }
-        wda.set("POST /element") { body in
-            guard let value = body?["value"]?.string, value.contains("Row 45"), swipes.value >= 4 else { return (404, ["value": ["error": "no such element", "message": "unable to find an element"]]) }
-            return (200, ["value": ["ELEMENT": "e1"]])
-        }
+        wda.delay("POST /wda/pressAndDragWithVelocity", 1.0)
+        let started = Date()
         let result = await core.call("do", ["actions": [["scroll_to": "Row 45"]]])
         XCTAssertTrue(result.text.contains("scroll_to \"Row 45\": 4 swipes, found at [16,320,358,44]"), result.text)
-        XCTAssertEqual(wda.sent.filter { $0 == "POST /element" }.count, 4, "\(wda.sent)")
-        XCTAssertEqual(wda.sent.filter { $0 == "GET /source" }.count, 3, "one read before, one once found, one after the actions: \(wda.sent)")
-        XCTAssertTrue(wda.bodies("POST /element").first?["value"]?.string?.contains("label CONTAINS[c] 'Row 45'") ?? false)
+        XCTAssertGreaterThan(Date().timeIntervalSince(started), 3.5, "four 1 s swipes outlast the 3 s action cap: scroll_to has 12 s")
+        XCTAssertTrue(wda.bodies("POST /wda/pressAndDragWithVelocity").allSatisfy { $0["holdDuration"]?.double == 0.05 })
     }
 }

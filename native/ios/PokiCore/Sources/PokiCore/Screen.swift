@@ -287,9 +287,14 @@ extension Runner {
         switch await picturePart {
         case .success(let png)?: reading.png = png
         case .failure(let e)?:
-            // The host's own path is apart from the runner: it gets up to 6 s of its own (simctl on a CI
-            // simulator took over 2 s, seen in the gym).
-            if let fallback = screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil {
+            // The tree came (on a second try, from a runner that was busy or new) but the picture
+            // taken beside the first try did not: the runner gives it now (seen in the gym). Else
+            // the host's own path, apart from the runner, with up to 6 s of its own (simctl on a CI
+            // simulator took over 2 s).
+            if treeCame, let again = try? await screenshot(timeout: max(0.5, min(1.5, started + timeout + extra - now()))) {
+                reading.png = again
+                reading.notes.append("the screenshot came on the second try (the first: \(e))")
+            } else if let fallback = screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil {
                 reading.png = png
                 reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
             } else {
