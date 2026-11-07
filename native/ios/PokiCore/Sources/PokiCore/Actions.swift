@@ -53,6 +53,15 @@ extension Computer {
 
     /// " at [x, y] (…)" when the point touched is not the element's centre, or something in the tree
     /// lies over it.
+    /// A container the size of the screen (a toolbar wrapper, a sheet's full-screen close control)
+    /// has no centre worth tapping; the answer says where the tap went (seen on the phone: taps on a
+    /// 402 by 874 "toolbar" element in a shop app).
+    func fillsScreen(_ spec: JSON?, _ p: (x: Double, y: Double)) -> String {
+        guard let spec, let ref = spec.int ?? spec["ref"]?.int, let e = refs[ref], let size else { return "" }
+        guard e.frame.width * e.frame.height >= 0.8 * size.width * size.height else { return "" }
+        return " (this element fills the screen, so the tap went to its centre at [\(Int(p.x.rounded())), \(Int(p.y.rounded()))], whatever is drawn there; tap a smaller element, or a point on the picture)"
+    }
+
     func offCentre(_ spec: JSON?, _ p: (x: Double, y: Double)) -> String {
         guard let spec, let ref = spec.int ?? spec["ref"]?.int, let e = refs[ref], !e.fromPicture, size != nil else { return "" }
         guard let hit = layout.touchPoint(e) else { return "" }
@@ -117,7 +126,7 @@ extension Computer {
         if let spec = action["tap"] {
             let p = try point(spec)
             try await tap(p)
-            return ("tap", "tap \(describe(action))\(offCentre(spec, p))")
+            return ("tap", "tap \(describe(action))\(offCentre(spec, p))\(fillsScreen(spec, p))")
         }
         if let text = action["type"]?.text {
             if let ref = action["ref"] {
@@ -126,8 +135,9 @@ extension Computer {
             }
             let hidden = describe(action).hasSuffix("(hidden)")
             let via = action["via"]?.string == "paste" ? "pasted" : "typed"
+            var pasteNote = ""
             if via == "pasted" {
-                try await paste(text, clear: action["clear"]?.bool ?? false, until: until)
+                pasteNote = try await paste(text, clear: action["clear"]?.bool ?? false, until: until)
             } else {
                 try await type(text, clear: action["clear"]?.bool ?? false)
             }
@@ -135,7 +145,7 @@ extension Computer {
             let reads = await fieldValue(timeout: min(1.5, max(0.3, until - now() - 0.2)))
             let readBack = reads.map { hidden ? "; the field now holds \($0.count) characters" : "; the field now reads \"\($0.count > 200 ? String($0.prefix(190)) + "…" : $0)\"" }
                 ?? "; the field could not be read back (no focused field answered in time), so check the elements or the picture"
-            return ("type", "\(describe(action)) (\(via))\(readBack)")
+            return ("type", "\(describe(action)) (\(via))\(readBack)\(pasteNote)")
         }
         if let key = action["key"]?.text {
             let k = key.lowercased()
@@ -265,8 +275,13 @@ extension Computer {
 
     /// The backup to typing (`via: "paste"`): the text goes through the clipboard and the field's edit
     /// menu. The owner's clipboard is read first and put back afterwards, whatever happens; if it
-    /// cannot be read, nothing is pasted (it would be lost).
-    func paste(_ text: String, clear: Bool, until: Double) async throws {
+    /// cannot be read, nothing is pasted (it would be lost). The clipboard is checked to hold the
+    /// text before Paste is tapped, and the owner's is put back only once the field shows the text:
+    /// iOS asks the owner "Allow Paste?" for an app's first paste from the runner, and putting the
+    /// owner's clipboard back before they answer pastes that instead (seen on the phone: the owner's
+    /// own text went into a shop's search box). Returns a note for the answer.
+    @discardableResult
+    func paste(_ text: String, clear: Bool, until: Double) async throws -> String {
         let saved: JSON
         do { saved = try await runner.call("POST", "/wda/getPasteboard", ["contentType": "plaintext"], timeout: 2, countsAsMiss: false) }
         catch { throw ActionFailure(message: "the clipboard could not be read, so it was not used (the owner's clipboard would be lost); type the text instead", delivery: .notSent) }
@@ -288,6 +303,12 @@ extension Computer {
                 _ = try await runner.call("POST", "/wda/keys", ["value": .array(Array(repeating: JSON.string("\u{8}"), count: min(400, value.count)))], timeout: 3 + 0.06 * Double(min(400, value.count)))
             }
             _ = try await runner.call("POST", "/wda/setPasteboard", ["content": .string(Data(text.utf8).base64EncodedString()), "contentType": "plaintext"], timeout: 2, countsAsMiss: false)
+            let holds = (try? await runner.call("POST", "/wda/getPasteboard", ["contentType": "plaintext"], timeout: 2, countsAsMiss: false))?.string
+                .flatMap { Data(base64Encoded: $0, options: .ignoreUnknownCharacters) }.map { String(decoding: $0, as: UTF8.self) }
+            guard holds == text else {
+                await restore()
+                throw ActionFailure(message: "the clipboard could not be set to the text (the runner's write did not take), so nothing was pasted; type the text instead", delivery: .notSent)
+            }
             _ = try await runner.call("POST", "/wda/touchAndHold", ["x": .number(x + w / 2), "y": .number(y + h / 2), "duration": .number(0.7)], timeout: 4)
             var item: Element?
             let menuBy = min(until - 0.3, now() + 2)
@@ -302,8 +323,28 @@ extension Computer {
                 throw ActionFailure(message: "the field's menu showed no Paste item; the text was not pasted (a long press was sent)", delivery: .sent)
             }
             try await tap(item.frame.centre)
-            await sleep(seconds: 0.3)
-            await restore()
+            // The paste has landed when the field shows the text; until then the clipboard stays.
+            let landedBy = min(until - 0.3, now() + 2.5)
+            var landed = false
+            while !landed, now() < landedBy {
+                await sleep(seconds: 0.25)
+                landed = await fieldValue(timeout: 0.8)?.contains(text) == true
+            }
+            if landed {
+                await restore()
+                return ""
+            }
+            // iOS may be asking the owner to allow the paste: the owner's clipboard goes back once
+            // the text is in the field, or after 45 s, from a task of its own.
+            Task { [self] in
+                let giveUp = now() + 45
+                while now() < giveUp {
+                    await sleep(seconds: 1)
+                    if await fieldValue(timeout: 1)?.contains(text) == true { break }
+                }
+                await restore()
+            }
+            return "; the field did not show the text within \(Int(((now() - (landedBy - 2.5)) * 1000).rounded())) ms: iOS may be asking the owner to allow the paste (the owner's clipboard is put back once the text lands, or after 45 s)"
         } catch {
             await restore()
             throw error

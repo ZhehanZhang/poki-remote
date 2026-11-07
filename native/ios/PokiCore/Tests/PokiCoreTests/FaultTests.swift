@@ -214,8 +214,8 @@ final class FaultTests: XCTestCase {
         wda.source([("Button", "General")])
         for key in ["GET /screenshot", "GET /wda/activeAppInfo"] { wda.set(key) { _ in (200, ["value": .null]) } }
         _ = await core.call("look", [:])
-        XCTAssertTrue(wda.sent.contains("DELETE /session"), "the session is ended so nothing queued behind the slow reads runs late")
-        XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, sessions + 1, "one new session once the runner is through")
+        XCTAssertFalse(wda.sent.contains("DELETE /session"), "slow reads keep the session; only an action that times out ends it")
+        XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, sessions, "the same session serves the next look once the runner is through")
     }
 
     func testAWedgedRunnerThatAnswersNothingIsRestartedAfterTheProbe() async throws {
@@ -275,30 +275,43 @@ final class FaultTests: XCTestCase {
     /// reported them failed. Now a request this side gives up on ends the session: WDA answers what
     /// is queued behind it with "session does not exist" instead of running it, and an action sent
     /// while the runner is still finishing is answered not_sent and busy, so nothing runs late.
-    func testGivingUpOnARequestEndsTheSessionAndTheNextActionIsAnsweredBusyNotRunLate() async {
+    /// A read that times out keeps the session (ending it would only put the next session open
+    /// behind the same slow read: seen on the phone, every look in WeChat opened a session that
+    /// queued behind the read before); an action is still answered busy, not queued to run late.
+    func testAReadThatTimesOutKeepsTheSessionAndTheNextActionIsAnsweredBusyNotRunLate() async {
         let (core, wda, _) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
         _ = await core.call("look", [:])
-        // The slow tree holds WDA's queue, so the lock check queued behind it is as slow (the fake does not queue).
         wda.set("GET /source") { _ in try await Task.sleep(nanoseconds: 3_000_000_000); return (200, ["value": .null]) }
         wda.set("GET /wda/locked") { _ in try await Task.sleep(nanoseconds: 3_000_000_000); return (200, ["value": false]) }
         let slow = await core.call("look", [:])
         XCTAssertTrue(slow.text.contains("no element tree"), slow.text)
         try? await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertTrue(wda.sent.contains("DELETE /session"), "the session is ended so what is queued behind the slow read is not run: \(wda.sent)")
-        // The next session waits its turn behind the slow read; an action sent now is not queued.
-        wda.set("POST /session") { _ in try await Task.sleep(nanoseconds: 2_000_000_000); return (200, ["value": ["sessionId": "s2"]]) }
+        XCTAssertFalse(wda.sent.contains("DELETE /session"), "a slow read keeps the session: \(wda.sent)")
+        // The check whether the runner is free queues behind the slow read (the fake does not queue).
+        wda.delay("GET /wda/activeAppInfo", 2)
         let tap = await core.call("do", ["actions": [["tap": [100, 120]]]])
         XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing an earlier GET /source from"), tap.text)
-        XCTAssertEqual(wda.sent.suffix(2), ["DELETE /session", "POST /session"], "only the new session was asked for, nothing else was queued: \(wda.sent)")
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 0, "nothing was queued to run late")
-        // Once the runner is through, the session that was opened in the meantime serves the next call.
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, 1, "the one session stays: \(wda.sent)")
+        try? await Task.sleep(nanoseconds: 2_800_000_000)
         wda.source([("Button", "General"), ("Button", "Privacy")])
         wda.set("GET /wda/locked") { _ in (200, ["value": false]) }
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.Preferences", "name": "Settings"]]) }
         let later = await core.call("do", ["actions": [["tap": [100, 120]]]])
         XCTAssertFalse(later.isError, later.text)
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1)
-        XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, 2, "the session opened while waiting is the one used")
+    }
+
+    /// An action that times out ends the session, so what was queued behind it does not run late.
+    func testGivingUpOnAnActionEndsTheSession() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 1 }
+        _ = await core.call("look", [:])
+        wda.set("POST /wda/tap") { _ in try await Task.sleep(nanoseconds: 3_000_000_000); return (200, ["value": .null]) }
+        let result = await core.call("do", ["actions": [["tap": [100, 120]], ["tap": [100, 160]]]])
+        XCTAssertTrue(result.text.contains("may have been delivered"), result.text)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(wda.sent.contains("DELETE /session"), "\(wda.sent)")
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, "the second tap was not queued")
     }
 
     /// WDA's XML tree lists the same elements as its JSON one, without the custom actions it fetches
@@ -472,5 +485,65 @@ final class MailTestTests: XCTestCase {
         let inPoki = await core.call("do", ["actions": [["tap": [100, 300]]]])
         XCTAssertFalse(inPoki.text.contains("brought back"), inPoki.text)
         XCTAssertEqual(wda.bodies("POST /wda/apps/activate").count, 1)
+    }
+}
+
+/// The owner's JD and WeChat test on the phone (Nov 7 2026, 12:21 to 12:45 am ET).
+final class ShopTestTests: XCTestCase {
+    /// The owner's own clipboard went into a shop's search box: iOS asked the owner to allow the
+    /// paste, and the owner's clipboard had been put back before they answered.
+    func testPasteKeepsTheTextOnTheClipboardUntilItLandsAndChecksItFirst() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 4 }
+        let field = FaultTests.Field()
+        field.install(wda, menu: true)
+        // The Paste tap inserts nothing (the owner is being asked): the field stays empty.
+        wda.set("POST /wda/tap") { _ in (200, ["value": .null]) }
+        _ = await core.call("look", [:])
+        let result = await core.call("do", ["actions": [["type": "83K12S", "via": "paste"]]])
+        XCTAssertTrue(result.text.contains("iOS may be asking the owner to allow the paste"), result.text)
+        XCTAssertEqual(field.clipboard.value, "83K12S", "the text stays on the clipboard for the owner's answer")
+        // The text lands (the owner allowed it): the owner's clipboard goes back.
+        field.value.value = "83K12S"
+        let restored = await eventually(4) { field.clipboard.value == "owner's clipboard" }
+        XCTAssertTrue(restored, "\(String(describing: field.clipboard.value))")
+    }
+
+    func testPasteIsRefusedWhenTheClipboardCannotBeSet() async {
+        let (core, wda, _) = makeCore()
+        let field = FaultTests.Field()
+        field.install(wda, menu: true)
+        wda.set("POST /wda/setPasteboard") { _ in (200, ["value": .null]) } // the write does not take
+        _ = await core.call("look", [:])
+        let result = await core.call("do", ["actions": [["type": "83K12S", "via": "paste"]]])
+        XCTAssertTrue(result.text.contains("the clipboard could not be set to the text"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/touchAndHold").count, 0, "no menu was opened")
+        XCTAssertEqual(field.clipboard.value, "owner's clipboard")
+    }
+
+    /// The tree showed the inside of a chat while the picture still showed the list.
+    func testThePictureIsTakenAgainWhenTheTreeCameLater() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 3 }
+        wda.delay("GET /source", 0.9)
+        let result = await core.call("look", [:])
+        XCTAssertEqual(wda.sent.filter { $0 == "GET /screenshot" }.count, 2, "\(wda.sent)")
+        XCTAssertTrue(result.text.contains("the picture was taken again after the tree"), result.text)
+    }
+
+    func testTheHomeScreenIsNamedAndANewScreenSaysItsNumbersStartAgain() async {
+        let (core, wda, _) = makeCore()
+        _ = await core.call("look", [:])
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.springboard", "name": ""]]) }
+        wda.source([("Icon", "Mail"), ("Icon", "Photos"), ("Icon", "Settings")], app: "")
+        let home = await core.call("do", ["actions": [["button": "home"]]])
+        XCTAssertTrue(home.text.hasPrefix("app: Home screen (SpringBoard"), home.text)
+        XCTAssertTrue(home.text.contains("a new screen: numbered from 1 again"), home.text)
+    }
+
+    func testATapOnAnElementThatFillsTheScreenSaysSo() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("Toolbar", "工具栏", [0, 0, 390, 844], [Node("Button", "加购", [300, 780, 80, 44])])], app: "京东")
+        _ = await core.call("look", [:])
+        let result = await core.call("do", ["actions": [["tap": 1]]])
+        XCTAssertTrue(result.text.contains("this element fills the screen, so the tap went to its centre at [195, 422]"), result.text)
     }
 }

@@ -36,6 +36,15 @@ final class FakeWDA: HTTPTransport, @unchecked Sendable {
     static let sessionlessOnly: Set<String> = ["POST /wda/homescreen"]
 
     func set(_ key: String, _ route: @escaping Route) { lock.lock(); routes[key] = route; lock.unlock() }
+    /// The route answers as before, after a wait.
+    func delay(_ key: String, _ seconds: Double) {
+        lock.lock(); let inner = routes[key]; lock.unlock()
+        set(key) { body in
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard let inner else { return (404, ["value": ["error": "unknown command"]]) }
+            return try await inner(body)
+        }
+    }
 
     /// The screen as rows of (type, label), 44 points apart.
     func source(_ rows: [(String, String)], app: String = "Settings") {

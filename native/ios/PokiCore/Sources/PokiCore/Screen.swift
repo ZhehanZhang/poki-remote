@@ -65,7 +65,11 @@ public struct Element: Equatable, Sendable {
 public struct Foreground: Equatable, Sendable {
     public var bundleID: String?
     public var name: String?
-    public var describe: String { name ?? bundleID ?? "unknown" }
+    public var describe: String {
+        if bundleID == "com.apple.springboard" { return "Home screen (SpringBoard: the home screen, the App Switcher, a banner or a system alert)" }
+        if let name, !name.isEmpty { return name }
+        return bundleID ?? "unknown"
+    }
 }
 
 public struct ScreenSize: Equatable, Sendable { public var width, height: Double }
@@ -203,21 +207,34 @@ extension Runner {
     /// is reported in `notes` instead of failing the read.
     func read(timeout: Double, wantPicture: Bool = true, format: String = "json") async -> Reading {
         let started = now()
+        let pictureAt = LockedBox<Double?>(nil)
         async let treePart: Result<(elements: [Element], foreground: Foreground), Error> = {
             do { return .success(try await self.tree(timeout: timeout, format: format)) } catch { return .failure(error) }
         }()
         async let picturePart: Result<Data, Error>? = wantPicture ? {
+            defer { pictureAt.value = now() }
             do { return .success(try await self.screenshot(timeout: timeout)) } catch { return .failure(error) }
         }() : nil
         var reading = Reading()
+        var treeCame = false
         switch await treePart {
-        case .success(let t): reading.elements = t.elements; reading.foreground = t.foreground
+        case .success(let t): reading.elements = t.elements; reading.foreground = t.foreground; treeCame = true
         case .failure(let e): reading.notes.append("no element tree: \(e)")
         }
+        let treeAt = now()
         switch await picturePart {
         case .success(let png)?: reading.png = png
         case .failure(let e)?: reading.notes.append("no screenshot: \(e)")
         case nil: break
+        }
+        // The tree and the picture are one moment: when the tree came well after the picture (a slow
+        // snapshot while the screen moved on), the picture is taken again so the frames and the
+        // pixels agree (seen on the phone: a tree of the inside of a chat with a picture of the list).
+        if treeCame, reading.png != nil, let at = pictureAt.value, treeAt - at > 0.6, started + timeout - now() > 0.4 {
+            if let again = try? await screenshot(timeout: min(1.5, started + timeout - now())) {
+                reading.png = again
+                reading.notes.append("the picture was taken again after the tree, which came \(Int(((treeAt - at) * 1000).rounded())) ms later than the first picture")
+            }
         }
         reading.ms = Int(((now() - started) * 1000).rounded())
         return reading

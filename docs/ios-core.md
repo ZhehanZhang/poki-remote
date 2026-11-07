@@ -168,7 +168,8 @@ Each answer is facts only: the app in front, numbered elements, what each action
 
 - **Numbers stay.** An element still on screen in the next read keeps its number (same text and frame
   first, then same text); a new screen (another app, or under 30% of the elements kept) numbers from
-  1 again. `do` lists only the new (`+`) and moved (`~`) elements and says how many others kept their
+  1 again, and its heading says so (`a new screen: numbered from 1 again, the numbers of the read
+  before no longer apply`). `do` lists only the new (`+`) and moved (`~`) elements and says how many others kept their
   numbers; `look` and `full=true` list everything.
 - **`screen_changed`** in every `do`: whether the elements, or only the picture, differ from the read
   before, so a no-op action is visible at once. The picture is compared as a 32 by 64 grid of grey
@@ -177,6 +178,20 @@ Each answer is facts only: the app in front, numbered elements, what each action
   picture-only change says how much and where (`in 3 % of it, within [372, 110, 13, 690]`), so the
   long scroll indicator iOS draws beside a two-page list fading out (seen on the simulator after a
   drag: 2-3 % in a strip at the right edge) reads as what it is without a look at the picture.
+- **The picture and the tree are of the same moment.** The screenshot is taken first (served apart
+  from WDA's queue) and the tree after it; when the tree came over 0.6 s later and time is left, the
+  picture is taken again after it (`note: the picture was taken again after the tree, which came
+  1,400 ms later than the first picture`), so a list and the chat opened from it are never shown as
+  one screen (seen on the phone in WeChat).
+- **An element that fills the screen** (80 % of it or more: a web view, a feed's container) is tapped
+  at its centre, and the answer says so (`this element fills the screen, so the tap went to its
+  centre at [201, 437], whatever is drawn there; tap a smaller element, or a point on the picture`).
+- **The home screen is named**: a read with SpringBoard in front says `app: Home screen
+  (SpringBoard: the home screen, the App Switcher, a banner or a system alert)`. WDA takes the app
+  under its "active app detection point" as the one in front; the default is near the top left
+  corner, under every banner and the Dynamic Island, so a banner made WDA dump SpringBoard's tree
+  instead of the app's (seen on the phone in JD). Each session moves the point to (200, 420), the
+  middle of the screen.
 - **The screenshot is one pixel per screen point** (402 px wide on a 402-point iPhone 17 Pro), and the
   answer says so: a point on the picture is a point to tap.
 - **Lean lists.** Text an element around it already says (a post's text and then each of its lines),
@@ -212,8 +227,13 @@ Each answer is facts only: the app in front, numbered elements, what each action
   digits are read back exactly in the tests), and every `type` says what the focused field holds
   afterwards (`the field now reads "…"`, or only its length for a password). `via: "paste"` is the
   backup the model may choose: PokiCore reads the owner's clipboard first (unreadable: nothing is
-  pasted), puts the text on it, opens the field's edit menu with a long press, taps Paste (the word
-  in 12 languages) and puts the owner's clipboard back whatever happened.
+  pasted), puts the text on it, reads it back (a write that did not take answers `not_sent`, with
+  "type the text instead"), opens the field's edit menu with a long press, taps Paste (the word in
+  12 languages) and watches the field for the text. The owner's clipboard goes back once the text
+  has landed, or after 45 s: an app's first paste from the runner makes iOS ask the owner to allow
+  it, and putting the clipboard back before the owner answers pastes the owner's own text (seen on
+  the phone, Nov 7 2026 12:30 am ET: the owner's clipboard went into JD's search box). While the
+  field has not shown the text the answer says `iOS may be asking the owner to allow the paste`.
 - **Locked phone**: `do` checks `/wda/locked` first and sends nothing but buttons while locked
   (`screen: locked`); `look` says so too. Unknown counts as unlocked.
 - **Approvals**: the owner's time on an approval does not count against the actions or the read;
@@ -255,18 +275,30 @@ Each answer is facts only: the app in front, numbered elements, what each action
   keyboard's looping slide-to-type introduction. A call that finds the runner `.starting` (restarting, or woken from idle by
   the app) waits for it, checking every 250 ms for up to `runnerWait` (15 s) within its deadline, then
   goes on; a `.failed` runner is answered at once with its fix.
-- **A request this side gives up on ends the session.** WDA serves every request but a few (status,
-  screenshot, ending a session) one after another on its main thread, and goes on serving a request
-  after the client has stopped waiting. Seen on the phone: a feed's tree took longer than a read, and
-  the swipes and taps sent after it waited their turn behind it and landed long after the agent had
-  reported them failed. So when a queued request times out PokiCore sends `DELETE /session` at once
-  (answered apart from the queue): WDA answers everything still queued for that session with "session
-  does not exist" instead of running it, and the request it is serving is the last thing it does for
-  it. The next call opens a new session, which waits its turn behind that request; a `do` whose turn
-  does not come within the action time answers `not_sent: the runner is still finishing an earlier GET
-  /source from 9 s ago` without sending anything, and a `look` says the same in its note and shows the
-  picture (screenshots are served apart from the queue). The next queued request that is answered
-  clears the note.
+- **An action this side gives up on ends the session; a read keeps it.** WDA serves every request
+  but a few (status, screenshot, ending a session) one after another on its main thread, and goes on
+  serving a request after the client has stopped waiting. Seen on the phone: a feed's tree took
+  longer than a read, and the swipes and taps sent after it waited their turn behind it and landed
+  long after the agent had reported them failed. So when an action (or a session open) times out or
+  is cut off by its action time, PokiCore sends `DELETE /session` at once (answered apart from the
+  queue): WDA answers everything still queued for that session with "session does not exist" instead
+  of running it, and the request it is serving is the last thing it does for it. A read (`GET`) that
+  times out keeps the session: nothing behind a read can act, and ending the session only put the
+  next session open behind the same slow read (seen on the phone, Nov 7 2026 12:35 am ET: every look
+  in WeChat opened a session that queued behind the read before it, and the session count climbed
+  while the reads kept failing). Before the next action PokiCore checks that the runner is through
+  (a cheap queued request answered in time); a `do` whose turn does not come within the action time
+  answers `not_sent: the runner is still finishing an earlier GET /source from 9 s ago` without
+  sending anything, and a `look` says the same in its note and shows the picture (screenshots are
+  served apart from the queue). The next queued request that is answered clears the note. An action
+  cut off after it reached the runner is `unknown`; one cut off while the session was still being
+  opened is `not_sent`.
+- **An answer is never lost to a relay drop.** A call keeps running when the relay connection
+  resets under it (seen on the phone: a three-action `do` answered "what was sent is unknown" when
+  the tunnel reset mid-call, though the actions had gone). Its answer cannot go to the connection
+  that is gone, so it is kept (the last three) and put in front of the next call's answer: `earlier,
+  never delivered to you: the do call whose connection dropped (finished at 00:31:12): …` then
+  `now:` and the new answer.
 - A plain `launch` activates the app (to the front as it is, or started if not running); only `fresh:
   true` ends it and starts it through XCTest's launch, whose handshake takes several seconds on the
   phone (a Photos launch hit the 6 s action time there). A launch action gets 9 s of action time,
