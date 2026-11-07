@@ -48,6 +48,8 @@ final class AppModel {
     private var launchingSince: Date?
     private var endCheck = 0
     private var lastAgentActivity = Date()
+    /// The agent's step now running (its label and start), for the foreground check above.
+    private var stepUnderWay: (summary: String, started: Date)?
     private var idleTimer: Timer?
     private var launcherConfig: LauncherConfig?
 
@@ -94,6 +96,13 @@ final class AppModel {
     /// setup step the person just did in Settings.
     func becameActive() {
         loopback.resume()
+        // Poki in front while an agent's step is under way: nobody opened it on purpose. A tap near the
+        // top of the screen hit the expanded Dynamic Island (iOS opens the activity's app), or the agent
+        // tapped the activity's own label in the tree. Logged so the phone log shows it; PokiCore sends
+        // the agent back to the app it was in.
+        if sessionOn, let step = stepUnderWay, Date().timeIntervalSince(step.started) < 20 {
+            log.add("app", "Poki came to the front during a step (\(step.summary)): a tap hit the Live Activity")
+        }
         if wantsOn, !sessionOn, pairingPath != nil, diskImage.isReady { startSession() }
         if let step = guiding, isDone(step) { stopGuide() }
     }
@@ -291,6 +300,7 @@ final class AppModel {
             relayStatus = status
         case .toolStarted(_, let summary):
             lastAgentActivity = Date()
+            stepUnderWay = (summary, Date())
             activityText = summary
             log.add("agent", "started: \(summary)")
             if problem?.hasPrefix("An approval ran out") == true { problem = nil }
@@ -303,6 +313,7 @@ final class AppModel {
             }
         case .toolFinished(let summary, let delivery, let app, let thumbnail):
             lastAgentActivity = Date()
+            stepUnderWay = nil
             lastAction = "\(summary) · \(delivery)"
             activityText = "Idle"
             let failed = delivery.hasPrefix("failed")
