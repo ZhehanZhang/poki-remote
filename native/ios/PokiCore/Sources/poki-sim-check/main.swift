@@ -130,7 +130,12 @@ let list = await call("look for the search field", "look")
 let searchRef = list.split(separator: "\n").first { $0.contains("SearchField") }.flatMap { line in line.split(separator: " ").first { Int($0.trimmingCharacters(in: CharacterSet(charactersIn: "+~"))) != nil } }.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "+~")) }
 if let searchRef, let fieldRef = Int(searchRef) {
     let text = "Wi-Fi 你好 123"
-    let typed = await call("type mixed text in search", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldRef))]]])
+    var typed = await call("type mixed text in search", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldRef))]]])
+    // Nothing typed because the runner was still busy (the keyboard's first use on a fresh simulator
+    // held it for seconds): sent again, as an agent would, once.
+    if typed.contains("nothing was typed") {
+        typed = await call("type again (the runner was busy)", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldRef))]]])
+    }
     // The read-back can miss its time while the keyboard comes up; the next read shows the field then.
     // Simulator tolerance: on a fresh simulator Settings' own main loop can stop answering for a while
     // after the first search (WDA's log: "did not confirm its main run loop is responsive"), so the
