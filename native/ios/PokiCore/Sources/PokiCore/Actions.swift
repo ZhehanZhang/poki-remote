@@ -125,9 +125,15 @@ extension Computer {
         let timeout = max(1, min(expected + 5, until - now() - 0.2))
         do {
             _ = try await runner.call("POST", "/wda/pressAndDragWithVelocity", ["fromX": .number(path.0), "fromY": .number(path.1), "toX": .number(path.2), "toY": .number(path.3), "pressDuration": .number(hold), "holdDuration": .number(rest), "velocity": .number(velocity.rounded())], timeout: timeout, countsAsMiss: false)
+            swipeUnread = true
         } catch let e as RunnerError where e.code == "unknown command" || e.code == "unknown method" {
             // A runner older than pressAndDragWithVelocity.
             _ = try await runner.call("POST", "/wda/dragfromtoforduration", ["fromX": .number(path.0), "fromY": .number(path.1), "toX": .number(path.2), "toY": .number(path.3), "duration": .number(max(0.05, hold))], timeout: timeout, countsAsMiss: false)
+            swipeUnread = true
+        } catch let e as RunnerError where e.delivery == .unknown {
+            // The runner may still carry it out: the screen is read before anything is swiped again.
+            swipeUnread = true
+            throw e
         }
     }
 
@@ -493,25 +499,54 @@ extension Computer {
         // than the read). The gesture itself is most of a swipe's time, so the action has 12 s;
         // when under 1.6 s is left the scroll stops where it is and says so, so the model calls it
         // again rather than being told that something unknown may have happened.
-        var all = lastAll, swipes = 0, last: String?, still = 0
+        // A swipe is never sent on top of one no read has shown: when the last swipe (of this call
+        // or an earlier one) went out and the read after it never came, the next step is that read,
+        // not another swipe. Each swipe moves 70 % of the area, so the reads overlap and a target
+        // cannot pass between them however slow the runner is (seen in the gym: row 250 of 300
+        // scrolled past unread over seven calls whose reads all came late, then "not found").
+        var all = lastAll, swipes = 0, last: String?, still = 0, waited = false
         func found(_ e: Element) -> String { scrollFound = e; return "\(swipes) swipes, found at \(e.frame.described) (its number is in the list below)" }
         func notYet(_ why: String) -> String { "\(swipes) swipes, \(wanted) not seen yet; \(why): call scroll_to again to go on from here" }
-        while hit(all) == nil, swipes < max {
-            guard until - now() > 1.6 else { return notYet("the action's time ran out before the list was through (\(Int(Self.scrollCap)) s)") }
-            // A swipe sent while the runner is still serving the read after the last one would only
-            // queue behind it and time out, and the whole scroll would come back unknown (seen in
-            // the gym on 300 rows): the runner is waited for, and a swipe the runner did not confirm
-            // ends the scroll with its progress, never with an unknown.
-            // The wait and the read after a swipe get the scroll's time (reads take 1-4 s on a loaded
-            // simulator; one swipe per call with 7 s unused was seen in the gym), ending early only
-            // when the time is near.
-            var waited = false
-            if runner.busyWith != nil {
-                waited = true
-                guard await runner.waitUntilFree(timeout: Swift.max(0.3, until - now() - 1.6)) else {
-                    return notYet("the runner is still finishing the read after the last swipe")
+        // A swipe sent while the runner is still serving the read after the last one would only
+        // queue behind it and time out, and the whole scroll would come back unknown (seen in
+        // the gym on 300 rows): the runner is waited for, and a swipe the runner did not confirm
+        // ends the scroll with its progress, never with an unknown.
+        // The wait and the read after a swipe get the scroll's time (reads take 1-4 s on a loaded
+        // simulator; one swipe per call with 7 s unused was seen in the gym), ending early only
+        // when the time is near.
+        func runnerFree(margin: Double) async -> Bool {
+            guard runner.busyWith != nil else { return true }
+            waited = true
+            return await runner.waitUntilFree(timeout: Swift.max(0.3, until - now() - margin))
+        }
+        while true {
+            if swipeUnread {
+                guard until - now() > 0.9 else { return notYet("the action's time ran out before the last swipe was read (\(Int(Self.scrollCap)) s); it is read first next time") }
+                guard await runnerFree(margin: 0.9) else { return notYet("the runner is still finishing the read after the last swipe") }
+                guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(config.readTimeout, until - now() - 0.5)), format: config.treeFormat) else {
+                    return notYet("the read after the last swipe did not come; nothing is swiped again until it has")
                 }
+                swipeUnread = false
+                let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
+                if signature == last, !waited {
+                    // The end is declared only when two swipes in a row, each sent to a free runner and
+                    // read after, left the list as it was. A swipe that went right after a wait for a
+                    // busy runner may not have moved the list (the app's main loop was serving the
+                    // snapshot; seen in the gym: a false end at row 180 of 300), so it does not count.
+                    still += 1
+                    if still >= 2 { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
+                } else {
+                    still = 0
+                }
+                last = signature
+                waited = false
+                all = seen.elements
+                continue
             }
+            if let e = hit(all) { return found(e) }
+            guard swipes < max else { return notYet("that is \(max) swipes (max_swipes takes up to 15)") }
+            guard until - now() > 1.6 else { return notYet("the action's time ran out before the list was through (\(Int(Self.scrollCap)) s)") }
+            guard await runnerFree(margin: 1.6) else { return notYet("the runner is still finishing the read after the last swipe") }
             do {
                 try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.8)
             } catch let e as RunnerError where e.delivery == .unknown {
@@ -519,23 +554,7 @@ extension Computer {
             }
             swipes += 1
             await sleep(seconds: 0.1)
-            guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(config.readTimeout, until - now() - 1.3)), format: config.treeFormat) else { last = nil; still = 0; continue }
-            let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
-            if signature == last, !waited {
-                // The end is declared only when two swipes in a row, each sent to a free runner and
-                // read after, left the list as it was. A swipe that went right after a wait for a
-                // busy runner may not have moved the list (the app's main loop was serving the
-                // snapshot; seen in the gym: a false end at row 180 of 300), so it does not count.
-                still += 1
-                if still >= 2 { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
-            } else {
-                still = 0
-            }
-            last = signature
-            all = seen.elements
         }
-        if let e = hit(all) { return found(e) }
-        return notYet("that is \(max) swipes (max_swipes takes up to 15)")
     }
 
     /// The time one scroll_to may take: more than an action, since it reports where it got to.

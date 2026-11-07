@@ -422,6 +422,14 @@ Each answer is facts only: the app in front, numbered elements, what each action
   after, left the list as it was. A swipe sent right after a wait for a busy runner does not count:
   the app's main loop may still be serving the snapshot and drop the drag (the gym's 300 rows: a
   false end at row 180). A read that fails between swipes starts the comparison over.
+- **A swipe is never sent on top of one no read has shown.** When a swipe went out (in this
+  `scroll_to` call or an earlier one, or a plain swipe or drag) and no tree read has come since,
+  the next `scroll_to` step is that read, not another swipe: `1 swipes, "Row 250" not seen yet; the
+  read after the last swipe did not come; nothing is swiped again until it has: call scroll_to
+  again`. Each swipe moves 70 % of the scroll area, so consecutive reads overlap and a target
+  cannot pass between them however late the reads come (the gym's 300 rows: seven calls each
+  swiped once with the read after it never landing, so rows 245-259 were never seen, and the
+  scroll ran to the end and said not found).
 - **Typing has 9 s and never leaves the keys in doubt.** A type is a tap, a wait for the focus and
   the keys, plus a wait for a busy runner, so it has 9 s (the action cap otherwise). When under
   1.2 s is left for the keys they are not sent: `nothing was typed … send the type again`.

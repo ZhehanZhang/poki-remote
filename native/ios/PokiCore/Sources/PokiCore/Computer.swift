@@ -36,6 +36,9 @@ final class Computer: @unchecked Sendable {
     var lastAll: [Element] = []
     /// When the latest tree was read (a `wait_until: settled` takes a fresh one as its first sample).
     var lastTreeAt: Double?
+    /// A swipe or drag went out that no tree read has shown yet: `scroll_to` reads before it swipes
+    /// again, so a target cannot pass between two reads (the gym's row 250, scrolled past unread).
+    var swipeUnread = false
     var lastForeground: Foreground?
     var size: ScreenSize?
     var lastPNG: Data?
@@ -216,6 +219,7 @@ final class Computer: @unchecked Sendable {
             }
             lastAll = reading.elements
             lastTreeAt = now()
+            swipeUnread = false
         } else if shown.isEmpty, !refs.isEmpty {
             // A picture but no tree and no text read from it: the numbers of the read before stand.
             notes.append("the elements of the read before keep their numbers (nothing newer was read)")
