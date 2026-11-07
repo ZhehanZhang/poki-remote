@@ -8,10 +8,22 @@ final class FaultTests: XCTestCase {
     final class Field: @unchecked Sendable {
         let value = LockedBox("")
         let clipboard = LockedBox<String?>("owner's clipboard")
+        /// The keyboard is up (a field has the focus), as the tree shows it.
+        let keyboard = LockedBox(true)
+        let menuShown = LockedBox(false)
+        /// The tree as the field's app shows it: the field with its value, the keyboard when up, and
+        /// the Paste menu once it was opened.
+        func tree() -> JSON {
+            var children: [Node] = [Node("TextField", "Note", [16, 100, 358, 44], value: value.value)]
+            if menuShown.value { children.append(Node("MenuItem", "Paste", [150, 50, 80, 40])) }
+            if keyboard.value { children.append(Node("Keyboard", nil, [0, 500, 390, 344], [Node("Button", "space", [100, 800, 190, 40])])) }
+            func json(_ n: Node) -> JSON {
+                ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "value": n.value.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
+            }
+            return ["type": "XCUIElementTypeApplication", "label": "Notes", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array(children.map(json))]
+        }
         func install(_ wda: FakeWDA, menu: Bool = true) {
-            wda.set("GET /element/active") { _ in (200, ["value": ["ELEMENT": "E1"]]) }
-            wda.set("GET /element/E1/attribute/value") { [value] _ in (200, ["value": .string(value.value)]) }
-            wda.set("GET /element/E1/rect") { _ in (200, ["value": ["x": 16, "y": 100, "width": 358, "height": 44]]) }
+            wda.set("GET /source") { [self] _ in (200, ["value": tree()]) }
             wda.set("POST /wda/keys") { [value] body in
                 for key in body?["value"]?.array ?? [] {
                     if key.string == "\u{8}" { value.update { if !$0.isEmpty { $0.removeLast() } } } else { value.update { $0 += key.string ?? "" } }
@@ -27,8 +39,8 @@ final class FaultTests: XCTestCase {
                 return (200, ["value": .null])
             }
             if menu {
-                wda.set("POST /wda/touchAndHold") { [wda] _ in
-                    wda.tree([Node("TextField", nil, [16, 100, 358, 44]), Node("MenuItem", "Paste", [150, 50, 80, 40])], app: "Notes")
+                wda.set("POST /wda/touchAndHold") { [menuShown] _ in
+                    menuShown.value = true
                     return (200, ["value": .null])
                 }
             }
@@ -290,7 +302,7 @@ final class FaultTests: XCTestCase {
         // The check whether the runner is free queues behind the slow read (the fake does not queue).
         wda.delay("GET /wda/activeAppInfo", 2)
         let tap = await core.call("do", ["actions": [["tap": [100, 120]]]])
-        XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing an earlier GET /source from"), tap.text)
+        XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing an earlier GET /"), tap.text)
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 0, "nothing was queued to run late")
         XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, 1, "the one session stays: \(wda.sent)")
         try? await Task.sleep(nanoseconds: 2_800_000_000)
@@ -579,18 +591,19 @@ final class GymTests: XCTestCase {
         let (core, wda, _) = makeCore()
         let field = FaultTests.Field()
         field.install(wda)
-        // The field focuses 0.5 s after the tap (a late-focus field).
-        let focusedAt = LockedBox<Double?>(nil)
-        wda.set("POST /wda/tap") { _ in focusedAt.value = Date().timeIntervalSince1970 + 0.5; return (200, ["value": .null]) }
-        wda.set("GET /element/active") { _ in
-            guard let at = focusedAt.value, Date().timeIntervalSince1970 >= at else { return (404, ["value": ["error": "no such element", "message": "none"]]) }
-            return (200, ["value": ["ELEMENT": "E1"]])
+        // The keyboard comes up 0.5 s after the tap (a late-focus field).
+        field.keyboard.value = false
+        wda.set("POST /wda/tap") { [keyboard = field.keyboard] _ in
+            Task { try? await Task.sleep(nanoseconds: 500_000_000); keyboard.value = true }
+            return (200, ["value": .null])
         }
         _ = await core.call("look", [:])
         let typed = await core.call("do", ["actions": [["type": "abc", "ref": 1]]])
         XCTAssertTrue(typed.text.contains("the field now reads \"abc\""), typed.text)
         XCTAssertFalse(typed.text.contains("no field was focused"), typed.text)
-        focusedAt.value = nil
+        XCTAssertFalse(wda.sent.contains("GET /element/active"), "focus is read from the tree, never asked of the runner")
+        field.keyboard.value = false
+        wda.set("POST /wda/tap") { _ in (200, ["value": .null]) }
         let none = await core.call("do", ["actions": [["type": "xyz"]]])
         XCTAssertTrue(none.text.contains("no field was focused when the text went"), none.text)
     }
@@ -605,11 +618,11 @@ final class GymTests: XCTestCase {
             for key in body?["value"]?.array ?? [] where key.string != "\u{8}" { value.update { $0 += key.string ?? "" } }
             return (200, ["value": .null])
         }
-        wda.set("POST /element/E1/clear") { [value = field.value] _ in value.value = ""; return (200, ["value": .null]) }
         _ = await core.call("look", [:])
         let typed = await core.call("do", ["actions": [["type": "new", "clear": true]]])
-        XCTAssertTrue(typed.text.contains("clear: the field still held \"old textnew\" after 8 deletes, so it was cleared again and the text typed again"), typed.text)
-        XCTAssertTrue(typed.text.contains("the field now reads \"new\""), typed.text)
+        XCTAssertTrue(typed.text.contains("clear: the field still held \"old textnew\" after 8 deletes, so 11 more deletes and the text were sent again"), typed.text)
+        XCTAssertTrue(typed.text.contains("the field now reads \"old textnewnew\""), typed.text)
+        XCTAssertEqual(wda.bodies("POST /wda/keys").count, 2)
     }
 
     func testBackTapsTheTopLeftButtonOrSwipesFromTheEdge() async {
@@ -703,5 +716,205 @@ final class GymTests: XCTestCase {
         XCTAssertFalse(look.isError, look.text)
         XCTAssertTrue(look.text.contains("runner: starting (the phone is asking the owner for the passcode)"), look.text)
         XCTAssertTrue(look.text.contains("call look or status again every few seconds"), look.text)
+    }
+
+    func testABusyGateAnswersWithThePicture() async {
+        let (core, wda, _) = makeCore { $0.busyWait = 0.2 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 1.5)
+        async let slow = core.call("look", [:])
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let busy = await core.call("look", [:])
+        XCTAssertTrue(busy.text.hasPrefix("busy: another call is still running"), busy.text)
+        XCTAssertNotNil(busy.jpeg)
+        XCTAssertFalse(busy.isError)
+        _ = await slow
+    }
+
+    func testATapOnAContainerNamesTheElementsInsideIt() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("Alert", "Gym alert", [20, 300, 350, 200], [Node("StaticText", "An alert on top of the screen.", [40, 320, 310, 40]), Node("Button", "Cancel", [40, 440, 150, 44]), Node("Button", "OK", [200, 440, 150, 44])])], app: "Gym")
+        let look = await core.call("look", [:])
+        guard let n = look.text.split(separator: "\n").first(where: { $0.contains("Alert") })?.trimmingCharacters(in: .whitespaces).split(separator: " ").first.flatMap({ Int($0) }) else { return XCTFail(look.text) }
+        let tap = await core.call("do", ["actions": [["tap": .number(Double(n))]]])
+        XCTAssertTrue(tap.text.contains("this element is a Alert, a container; the elements inside it are"), tap.text)
+        XCTAssertTrue(tap.text.contains("\"Cancel\"") && tap.text.contains("\"OK\"") && tap.text.contains("tap one of those"), tap.text)
+    }
+
+    /// The gym's dense screen hung the app's main loop: WDA's queue held one GET /wda/activeAppInfo
+    /// for over a minute while its status answered, so nothing restarted it. Now a stall older than
+    /// `wedgedAfter` with a queued probe unanswered restarts the runner, and the next call says so.
+    func testAWedgedRunnerIsRestartedAndTheNextCallSaysWhy() async {
+        let (core, wda, host) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
+        core.runner.wedgedAfter = 0.6
+        _ = await core.call("look", [:])
+        // Every queued request waits behind the hung one (the fake has no queue of its own).
+        for route in ["GET /source", "GET /wda/activeAppInfo", "GET /screenshot", "POST /appium/settings", "POST /session"] { wda.delay(route, 30) }
+        _ = await core.call("look", [:])
+        let stuck = await core.call("look", [:])
+        XCTAssertTrue(stuck.text.contains("still finishing an earlier") && stuck.text.contains("restarted on its own if it is not through"), stuck.text)
+        XCTAssertNotNil(core.runner.busyWith)
+        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        XCTAssertEqual(host.restarts.value, 1, "the wedged runner was restarted")
+        XCTAssertNil(core.runner.busyWith, "the stall went with the old runner")
+        XCTAssertTrue(core.runner.lastRestart.value?.contains("wedged on ") ?? false, core.runner.lastRestart.value ?? "nil")
+        // The new runner answers; the first call says what happened, once.
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.Preferences", "name": "Settings"]]) }
+        wda.set("GET /screenshot") { _ in (200, ["value": .string(Data("png".utf8).base64EncodedString())]) }
+        wda.set("POST /appium/settings") { _ in (200, ["value": .null]) }
+        wda.set("POST /session") { _ in (200, ["value": ["sessionId": "s2"]]) }
+        wda.source([("Button", "General"), ("Button", "Privacy")])
+        let after = await core.call("look", [:])
+        XCTAssertTrue(after.text.hasPrefix("runner: the runner wedged on "), after.text)
+        XCTAssertTrue(after.text.contains("this is the new runner"), after.text)
+        XCTAssertFalse(after.isError)
+        let again = await core.call("look", [:])
+        XCTAssertFalse(again.text.contains("wedged"), "reported once: \(again.text)")
+    }
+
+    /// A stall is bookkeeping about one runner process: a refused connection, or a runner the app
+    /// is seen restarting, clears it (seen in the gym: the first do after a restart still waited on
+    /// the old runner's request).
+    func testAStallDoesNotOutliveTheRunner() async {
+        let (core, wda, host) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
+        core.runner.wedgedAfter = 60
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 30)
+        _ = await core.call("look", [:])
+        XCTAssertNotNil(core.runner.busyWith)
+        wda.set("GET /status") { _ in throw TransportError.refused }
+        _ = try? await core.runner.raw("GET", "/status", timeout: 1)
+        XCTAssertNil(core.runner.busyWith, "refused: the process is gone")
+
+        wda.set("GET /status") { _ in (200, ["value": ["ready": true]]) }
+        _ = await core.call("look", [:])
+        XCTAssertNotNil(core.runner.busyWith)
+        host.state.value = .starting("relaunching")
+        Task { try? await Task.sleep(nanoseconds: 300_000_000); host.state.value = .running }
+        wda.source([("Button", "General")])
+        let after = await core.call("look", [:])
+        XCTAssertNil(core.runner.busyWith, "a restart seen clears it: \(after.text)")
+        XCTAssertTrue(after.text.contains("General"), after.text)
+    }
+
+    /// 200 rows outran the action's time: the scroll stops in time and says how far it got and that
+    /// calling it again goes on, instead of "may have been delivered".
+    func testAScrollThatOutrunsTheActionsTimeSaysHowFarItGot() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let n = swipes.update { $0 += 1; return $0 }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        let result = await core.call("do", ["actions": [["scroll_to": ["text": "Row 250", "max_swipes": 12]]]])
+        XCTAssertFalse(result.text.contains("may have been delivered"), result.text)
+        XCTAssertTrue(result.text.contains("\"Row 250\" not seen yet; the action's time ran out"), result.text)
+        XCTAssertTrue(result.text.contains("call scroll_to again to go on"), result.text)
+        XCTAssertTrue(result.text.contains("(sent,"), result.text)
+        XCTAssertFalse(result.isError)
+    }
+
+    /// A host with its own way to the screen (the launcher's tunnel) gives the picture when the
+    /// runner cannot, so a hung app never blinds the model.
+    func testTheHostsOwnScreenshotIsUsedWhenTheRunnerGivesNone() async {
+        let host = FakeHost()
+        host.ownScreenshot.value = Data("own-png".utf8)
+        let (core, wda, _) = makeCore(host: host) { $0.readTimeout = 0.5 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /screenshot", 30)
+        let look = await core.call("look", [:])
+        XCTAssertEqual(look.jpeg, Data("jpeg:7".utf8), look.text)
+        XCTAssertTrue(look.text.contains("screenshot: taken apart from the runner"), look.text)
+        XCTAssertFalse(look.isError)
+    }
+
+    /// The gym's 1,500-cell screen: the full-depth tree timed out at 4 s twice and the look answered
+    /// nothing; now the read goes on at half depth within the same call.
+    func testATimedOutTreeIsReadAgainShallowerWithinTheCall() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 14; $0.readTimeout = 1 }
+        _ = await core.call("look", [:])
+        let shallow = LockedBox(false)
+        wda.set("POST /appium/settings") { body in
+            if body?["settings"]?["snapshotMaxChildren"]?.double == 150 { shallow.value = true }
+            return (200, ["value": .null])
+        }
+        let root: JSON = ["type": "XCUIElementTypeApplication", "label": "Settings", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array([
+            ["type": "XCUIElementTypeCell", "label": "Row 1", "rect": ["x": 16, "y": 100, "width": 358, "height": 44]],
+        ])]
+        wda.set("GET /source") { _ in
+            if shallow.value { return (200, ["value": root]) }
+            try await Task.sleep(nanoseconds: 2_500_000_000)
+            return (200, ["value": root])
+        }
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("Row 1"), look.text)
+        XCTAssertTrue(look.text.contains("so it was read again with at most 150 children per element within this call; only the first 150 children of each element are listed"), look.text)
+        XCTAssertFalse(look.isError)
+    }
+
+    /// A WKWebView whose page is not in the tree is listed all the same, as [collapsed], with the
+    /// picture's text inside it in every look.
+    func testAWebViewWithNothingInTheTreeIsListedWithThePicturesText() async {
+        let host = FakeHost()
+        host.texts.value = [RecognizedText(text: "A web page", box: Rect(x: 0.1, y: 0.2, width: 0.5, height: 0.04)), RecognizedText(text: "Open", box: Rect(x: 0.1, y: 0.3, width: 0.2, height: 0.04))]
+        let (core, wda, _) = makeCore(host: host)
+        wda.tree([
+            Node("NavigationBar", "Page", [0, 60, 390, 44], [Node("StaticText", "Page", [150, 70, 90, 20])]),
+            Node("WebView", nil, [0, 104, 390, 740]),
+        ], app: "Gym")
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("WebView \"web page (its parts are not in the tree yet: read again in a second)\" [0,104,390,740] [collapsed]"), look.text)
+        XCTAssertTrue(look.text.contains("\"A web page\"") && look.text.contains("\"Open\""), look.text)
+        XCTAssertTrue(look.text.contains("(read from the picture)"), look.text)
+    }
+
+    /// The gym's 300-row list: two swipes fit the 6 s an action had. scroll_to now has 12 s, and
+    /// still reads after every swipe (a blind swipe can carry the target past the screen).
+    func testScrollToHasTwelveSecondsAndReadsAfterEverySwipe() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3; $0.toolDeadline = 20 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            let n = swipes.update { $0 += 1; return $0 }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        wda.delay("POST /wda/pressAndDragWithVelocity", 1.0)
+        let started = Date()
+        let result = await core.call("do", ["actions": [["scroll_to": "Row 45"]]])
+        XCTAssertTrue(result.text.contains("scroll_to \"Row 45\": 4 swipes, found at [16,320,358,44]"), result.text)
+        XCTAssertGreaterThan(Date().timeIntervalSince(started), 3.5, "four 1 s swipes outlast the 3 s action cap: scroll_to has 12 s")
+        XCTAssertTrue(wda.bodies("POST /wda/pressAndDragWithVelocity").allSatisfy { $0["holdDuration"]?.double == 0.05 })
+    }
+
+    /// 300 rows in the gym: a swipe sent while the runner was still serving the read after the last
+    /// one queued behind it, timed out, and the whole scroll came back unknown. Now the runner is
+    /// waited for, and a swipe it did not confirm ends the scroll with its progress.
+    func testScrollToNeverEndsUnknownWhenTheRunnerFallsBehind() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3; $0.toolDeadline = 20; $0.readTimeout = 0.5 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            let n = swipes.update { $0 += 1; return $0 }
+            if n == 2 { try await Task.sleep(nanoseconds: 9_000_000_000) }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        let result = await core.call("do", ["actions": [["scroll_to": "Row 250"]]])
+        XCTAssertFalse(result.text.contains("unknown"), result.text)
+        XCTAssertTrue(result.text.contains("1 swipes, \"Row 250\" not seen yet; the runner did not confirm the last swipe in time"), result.text)
+        XCTAssertTrue(result.text.contains("(sent,"), result.text)
+
+        // A read the runner is still serving: the next scroll_to waits for it, and says so when it is not through.
+        wda.set("POST /wda/pressAndDragWithVelocity") { _ in (200, ["value": .null]) }
+        wda.delay("GET /source", 6)
+        wda.delay("GET /wda/activeAppInfo", 6)
+        _ = await core.call("look", [:])
+        let again = await core.call("do", ["actions": [["scroll_to": "Row 250"]]])
+        XCTAssertTrue(again.text.contains("not_sent") || again.text.contains("still finishing"), again.text)
     }
 }

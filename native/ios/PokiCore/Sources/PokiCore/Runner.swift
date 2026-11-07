@@ -70,6 +70,41 @@ public final class URLSessionTransport: HTTPTransport {
 
 /// The WebDriverAgent runner on the phone (W3C WebDriver plus WDA's extensions). Every request has its
 /// own timeout, and one session is kept and made again when WDA says it is gone.
+/// How much of the tree WDA snapshots: `depth` (WDA default 50) bounds nesting, `children` bounds
+/// the children of one element (a feed with hundreds of sibling cells is cut, not nesting). After a
+/// read that timed out the next read asks for less; a fast read asks for more again.
+struct SnapshotLimits: Equatable, Sendable {
+    var depth: Int
+    var children: Int
+    static let full = SnapshotLimits(depth: 50, children: 2_147_483_647)
+    static let fewestChildren = 60
+    var isFull: Bool { self == .full }
+    /// The next step down: the children first (siblings are what a dense screen has), then the depth.
+    var smaller: SnapshotLimits {
+        if children > 150 { return SnapshotLimits(depth: depth, children: 150) }
+        if depth > 12 { return SnapshotLimits(depth: max(12, depth / 2), children: max(Self.fewestChildren, children / 2)) }
+        return SnapshotLimits(depth: depth, children: max(Self.fewestChildren, children / 2))
+    }
+    /// The next step back up.
+    var larger: SnapshotLimits {
+        let d = min(50, depth * 2)
+        let c = children >= 600 ? Self.full.children : children * 2
+        return SnapshotLimits(depth: d, children: c)
+    }
+    var described: String {
+        var parts: [String] = []
+        if depth < 50 { parts.append("depth \(depth)") }
+        if children != Self.full.children { parts.append("at most \(children) children per element") }
+        return parts.joined(separator: ", ")
+    }
+    var caveat: String {
+        var parts: [String] = []
+        if depth < 50 { parts.append("deeper parts of nested elements may be missing") }
+        if children != Self.full.children { parts.append("only the first \(children) children of each element are listed (the end of a long list, and anything an app put after it, is not; scroll_to finds what is further down)") }
+        return parts.joined(separator: "; ")
+    }
+}
+
 public final class Runner: @unchecked Sendable {
     public let url: URL
     let transport: HTTPTransport
@@ -91,8 +126,19 @@ public final class Runner: @unchecked Sendable {
     /// How many actions this side has given up on (sent, and not answered in time). A call compares
     /// it before and after an action to tell a timeout that reached the runner from one that did not.
     let actionsGivenUp = LockedBox(0)
-    /// What the runner is still finishing, if anything: "GET /source, 7 s ago".
-    public var busyWith: String? { stall.value.map { "\($0.path) from \(Int((now() - $0.since).rounded())) s ago" } }
+    /// What the runner is still finishing, if anything: "GET /source from 7 s ago (restarted on its
+    /// own if it is not through in 15 s)".
+    public var busyWith: String? { stall.value.map { "\($0.path) from \(Int((now() - $0.since).rounded())) s ago (the runner is restarted on its own if it is not through in \(Int(wedgedAfter)) s)" } }
+    /// A queued request this side gave up on that is still unanswered after this long, while a cheap
+    /// queued probe is not answered either, is a wedged runner (seen in the gym: an app whose main
+    /// loop hung held WDA's queue for over a minute, and every read, action and screenshot behind it;
+    /// WDA's own status answered, so the health probe saw nothing wrong). Nothing sent to it would
+    /// run, so it is restarted (`onUnhealthy`), and the next call says why.
+    var wedgedAfter: Double = 15
+    /// Why the runner was last restarted by this side, for the next call to report (once).
+    let lastRestart = LockedBox<String?>(nil)
+    /// The host's own way to a screenshot (apart from the runner), used when the runner gives none.
+    var screenshotFallback: (@Sendable () async -> Data?)?
     /// Requests WDA answers apart from its queue (FBRoute `.standalone`).
     static let standalone: Set<String> = ["GET /status", "GET /screenshot", "DELETE /session"]
 
@@ -120,23 +166,22 @@ public final class Runner: @unchecked Sendable {
     /// and to a system alert (a paste or permission prompt) when one is up, so the tree shows it.
     /// `snapshotMaxDepth` (WDA default 50) bounds the tree; after a read that timed out the next
     /// read asks for half the depth (never under 12), and a fast read restores it.
-    static func sessionSettings(deadline: Double, depth: Int) -> JSON {
-        ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": .number(deadline), "activeAppDetectionPoint": "200,420", "snapshotMaxDepth": .number(Double(depth))]
+    static func sessionSettings(deadline: Double, limits: SnapshotLimits) -> JSON {
+        ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": .number(deadline), "activeAppDetectionPoint": "200,420", "snapshotMaxDepth": .number(Double(limits.depth)), "snapshotMaxChildren": .number(Double(limits.children))]
     }
     /// WDA's settings live in its process (FBConfiguration), not in the session: set once per runner
     /// life, by the first session, and again only to change the depth.
     public var accessibilityDeadline: Double = 2
-    let depth = LockedBox(50)
-    let nextDepth = LockedBox(50)
+    let limits = LockedBox(SnapshotLimits.full)
+    let nextLimits = LockedBox(SnapshotLimits.full)
     let settingsApplied = LockedBox(false)
 
-    /// The tree depth for the next read, applied through the session's settings when it differs
+    /// The snapshot limits for the next read, applied through the session's settings when they differ
     /// from what the runner has (a queued request, bounded at 2 s).
-    func useDepth(_ wanted: Int) async {
-        let current = depth.value
-        guard wanted != current, let id = try? await session(timeout: 3) else { return }
-        if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted))]], timeout: 2, countsAsMiss: false)) != nil {
-            depth.value = wanted
+    func useLimits(_ wanted: SnapshotLimits) async {
+        guard wanted != limits.value, let id = try? await session(timeout: 3) else { return }
+        if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted.depth)), "snapshotMaxChildren": .number(Double(wanted.children))]], timeout: 2, countsAsMiss: false)) != nil {
+            limits.value = wanted
         }
     }
 
@@ -159,8 +204,10 @@ public final class Runner: @unchecked Sendable {
                 try await transport.send(method: method, url: target, body: body?.data(), timeout: timeout)
             }
         } catch TransportError.refused {
+            // A refused connection is a runner process that is gone: what it was finishing went with it.
+            stall.value = nil
             miss()
-            throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted", delivery: .notSent, silent: true)
+            throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted: call look again in about 10 s", delivery: .notSent, silent: true)
         } catch let error as DeadlineExceeded {
             if countsAsMiss { miss(timedOut: true) }
             if queued { abandon(method, path, endSession: method != "GET") }
@@ -205,7 +252,8 @@ public final class Runner: @unchecked Sendable {
     /// phone: every look in WeChat opened a session that queued behind the read before it). An
     /// action or a session open that times out ends the session, so nothing runs late.
     private func abandon(_ method: String, _ path: String, endSession: Bool = true) {
-        stall.update { if $0 == nil { $0 = ("\(method) \(Self.short(path))", now()) } }
+        let stalled: (path: String, since: Double) = ("\(method) \(Self.short(path))", now())
+        if stall.update({ s -> Bool in if s == nil { s = stalled; return true }; return false }) { watch(stalled) }
         guard endSession, let id = state.value.session, path.hasPrefix("/session/\(id)") else { return }
         actionsGivenUp.update { $0 += 1 }
         forgetSession()
@@ -213,6 +261,23 @@ public final class Runner: @unchecked Sendable {
             _ = try? await withDeadline(2.5, "ending the session") {
                 try await transport.send(method: "DELETE", url: URL(string: url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/session/\(id)")!, body: nil, timeout: 2)
             }
+        }
+    }
+
+    /// The watchdog for one stall: after `wedgedAfter`, when the same request is still unanswered, a
+    /// cheap queued probe (3 s) tells whether the queue moves at all; when it does not, the runner is
+    /// wedged and restarted. A runner that is through by then has cleared the stall on its own.
+    private func watch(_ stalled: (path: String, since: Double)) {
+        Task { [weak self] in
+            guard let wedgedAfter = self?.wedgedAfter else { return }
+            try? await Task.sleep(nanoseconds: UInt64(max(0, wedgedAfter) * 1_000_000_000))
+            guard let self, let s = self.stall.value, s.since == stalled.since else { return }
+            if (try? await self.raw("GET", "/wda/activeAppInfo", timeout: 3, countsAsMiss: false)) != nil { return }
+            guard let still = self.stall.value, still.since == stalled.since else { return }
+            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+            self.lastRestart.value = "the runner wedged on \(still.path) (unanswered for \(Int((now() - still.since).rounded())) s), so it was restarted at \(f.string(from: Date()))"
+            self.forgetRunner()
+            self.onUnhealthy?()
         }
     }
 
@@ -235,7 +300,7 @@ public final class Runner: @unchecked Sendable {
 
     func forgetSession() { state.update { $0.session = nil } }
     /// The runner was restarted: its settings are the defaults again.
-    func forgetRunner() { forgetSession(); settingsApplied.value = false; depth.value = 50 }
+    func forgetRunner() { forgetSession(); settingsApplied.value = false; limits.value = .full; stall.value = nil }
 
     /// Whether the runner is through with the request this side gave up on: a cheap queued request
     /// (opening the session, or the active app) answered within `timeout` means the queue has
@@ -267,7 +332,7 @@ public final class Runner: @unchecked Sendable {
                     throw RunnerError(message: "the runner opened no session", delivery: .notSent)
                 }
                 // Best effort: a runner that refuses the settings still works, only slower.
-                if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings(deadline: accessibilityDeadline, depth: depth.value)], timeout: 2, countsAsMiss: false)) != nil {
+                if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings(deadline: accessibilityDeadline, limits: limits.value)], timeout: 2, countsAsMiss: false)) != nil {
                     settingsApplied.value = true
                 }
                 state.update { $0.session = id }

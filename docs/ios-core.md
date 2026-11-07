@@ -125,6 +125,9 @@ public protocol CoreHost: AnyObject, Sendable {
     /// Text read from the screenshot, for elements an app collapsed. Optional: PokiCore's default
     /// answers it with Vision (VNRecognizeTextRequest), so the app need not implement it.
     func recognizeText(inPNG png: Data) async -> [RecognizedText]?
+    /// A screenshot apart from the runner (the launcher's tunnel: the DVT screenshot service, or
+    /// simctl on the simulator), asked for only when the runner gives none. Default nil.
+    func screenshotWithoutRunner() async -> Data?
 }
 
 public final class PokiCore: Sendable {
@@ -340,6 +343,63 @@ Each answer is facts only: the app in front, numbered elements, what each action
   served apart from the queue). The next queued request that is answered clears the note. An action
   cut off after it reached the runner is `unknown`; one cut off while the session was still being
   opened is `not_sent`.
+- **A wedged runner is restarted on its own.** An app whose main loop hangs holds WDA's queue, and
+  every read, action and screenshot behind it, while WDA's own `GET /status` still answers, so the
+  health probe sees nothing wrong (seen in the CI gym, Nov 7 2026 2:30 am ET: a 3,000-element
+  screen held one `GET /wda/activeAppInfo` for 75 s; every call answered "still finishing an
+  earlier" and the screenshot timed out too). A stall older than 15 s (`Runner.wedgedAfter`) with a
+  cheap queued probe (3 s) unanswered is a wedge: PokiCore forgets the runner and asks the host to
+  restart it, and the first call that goes through starts with `runner: the runner wedged on GET
+  /wda/activeAppInfo (unanswered for 18 s), so it was restarted at 02:31:05; this is the new runner`
+  (reported once; a call while it is still starting says the same above `runner: starting`). The
+  busy note says so ahead of time: `… from 7 s ago (the runner is restarted on its own if it is not
+  through in 15 s)`. A stall never outlives the runner process: a refused connection, a restart
+  PokiCore asked for, or a runner the host reports as starting clears it (seen in the gym: the first
+  `do` after a restart still waited on the old runner's request). A busy, hand-off or
+  "another call is running" answer that says what to do next is not an error even when the runner
+  gives no picture.
+- **Focus is read from the tree, never asked of the runner.** WDA's focus query (`GET
+  /element/active`, an XCTest query for the element with keyboard focus) hung the CI simulator's
+  runner for 19 s on the keyboard's first-use intro, and every request queued behind it went down
+  with the runner (Nov 7 2026, 3:40-4:05 am ET, three runs). Typing now waits for the keyboard to
+  be listed in the tree (a sessionless read every 150 ms, up to 2 s), reads the field back from
+  the tree (the field under the tapped element, else the one holding the text, else the only one),
+  and `clear: true` re-clears with deletes, never WDA's element clear. The note when no keyboard
+  came: `no field was focused when the text went (no keyboard came up in 2000 ms), so it may have
+  gone nowhere`. Paste finds the field's frame the same way.
+- **The screenshot is asked for again when the tree came late.** A read whose tree came on its
+  second try (a runner that was busy, or restarted) but whose picture, taken beside the first
+  try, did not, asks the runner for the picture again (1.5 s) before the host's own path.
+- **A tree that times out is read again shallower within the same call.** A full-depth read that
+  times out (4 s) is followed, once the runner is through with it (a queued probe answered), by a
+  read with smaller snapshot limits within the call's remaining time: first at most 150 children
+  per element (WDA's `snapshotMaxChildren`; a dense screen is wide, not deep: the gym's 1,500
+  cells are siblings, so depth alone did not help), then half the depth (never under 12) with half
+  the children (never under 60): `the full tree timed out (…), so it was read again with at most
+  150 children per element within this call; a long list shows its first 150 rows only (scroll_to
+  finds the rest)` (seen in the gym, Nov 7 2026 3:05 am ET: the 1,500-cell screen timed out twice
+  and the look answered nothing, 8-9 s per call). The next read starts at those limits and a fast
+  read doubles them back toward the full tree.
+- **A web view with nothing of its page in the tree is listed all the same.** WebKit's parts reach
+  the tree late or not at all under a reduced depth (seen in the gym: three looks at a WKWebView
+  listed the nav bar and nothing of the page). A WebView element is listed even with no text, as
+  `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
+  the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
+  parts arrive 3-4 s after the page loads).
+- **A scroll that outruns its time says how far it got.** `scroll_to` has 12 s (not an action's
+  6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
+  blind swipe can carry the target past the screen; an element search on the runner is a full
+  snapshot too, no faster: seen in the gym, where the gesture itself is most of a swipe's 2.5-3 s).
+  Up to 12 swipes per call (`max_swipes` up to 15). A swipe is never sent while the runner is still
+  serving the read after the last one (it would queue, time out, and make the whole scroll
+  unknown: seen in the gym on 300 rows): the runner is waited for, up to 2 s, and a swipe the
+  runner did not confirm in time ends the scroll with its progress (`1 swipes, "Row 250" not seen
+  yet; the runner did not confirm the last swipe in time (…), so it may still land: call scroll_to
+  again`), never with an unknown. When under 1.6 s is left it stops where it is: `4 swipes, "Row 250" not
+  seen yet; the action's time ran out before the list was through (12 s): call scroll_to again to
+  go on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
+  that stops moving says "its end, or the text is not in it"; the swipe limit reached says to call
+  again (`max_swipes` up to 12).
 - **An answer is never lost to a relay drop.** A call keeps running when the relay connection
   resets under it (seen on the phone: a three-action `do` answered "what was sent is unknown" when
   the tunnel reset mid-call, though the actions had gone). Its answer cannot go to the connection

@@ -158,7 +158,11 @@ func listable(_ elements: [Element], _ size: ScreenSize) -> [Element] {
     return elements.filter { e in
         let key = "\(e.type)|\(e.text)|\(Int(e.frame.x))|\(Int(e.frame.y))|\(Int(e.frame.width))|\(Int(e.frame.height))"
         guard seen.insert(key).inserted else { return false }
-        guard !e.text.isEmpty else { return false }
+        // A web view is listed even with nothing in it: its page is what the model is after, and
+        // WebKit's parts reach the tree late, or not at all under a reduced depth (seen in the gym:
+        // three looks at a WKWebView listed the nav bar and nothing of the page). Listed as
+        // [collapsed], its text is read from the picture.
+        guard !e.text.isEmpty || (e.type == "WebView" && e.frame.height >= 40) else { return false }
         let f = e.frame
         guard f.x + f.width > 0 && f.y + f.height > 0 && f.x < size.width && f.y < size.height else { return false }
         // The Dynamic Island (and Poki's Live Activity in it) is never listed: a tap there opens Poki.
@@ -215,14 +219,17 @@ extension Runner {
 
     /// The screenshot and the tree at the same time; each has its own deadline, and a part that fails
     /// is reported in `notes` instead of failing the read.
-    func read(timeout: Double, wantPicture: Bool = true, format: String = "json") async -> Reading {
+    /// `extra`: time past `timeout` that a shallow re-read may take when the full-depth read timed
+    /// out (seen in the gym: a 1,500-cell screen timed out twice at 4 s and answered nothing, while
+    /// the depth-12 read after came in 0.2 s; a shallow tree now beats 4 s of nothing).
+    func read(timeout: Double, extra: Double = 0, wantPicture: Bool = true, format: String = "json") async -> Reading {
         let started = now()
         let pictureAt = LockedBox<Double?>(nil)
         // After a read that timed out, the next asks for half the tree's depth (a huge tree is what
         // takes long); a read that came fast restores the full depth for the one after it.
-        let wantedDepth = nextDepth.value
-        if wantedDepth != depth.value { await useDepth(wantedDepth) }
-        let readDepth = depth.value
+        let wanted = nextLimits.value
+        if wanted != limits.value { await useLimits(wanted) }
+        let readLimits = limits.value
         async let treePart: Result<(elements: [Element], foreground: Foreground), Error> = {
             do { return .success(try await self.tree(timeout: timeout, format: format)) } catch { return .failure(error) }
         }()
@@ -248,20 +255,51 @@ extension Runner {
                 } else {
                     reading.notes.append("no element tree: \(e); a second try within the read's time was refused too")
                 }
+            } else if extra > 2, readLimits.smaller != readLimits, "\(e)".contains("did not finish within") || "\(e)".contains("did not answer") {
+                // Timed out: a smaller re-read within this call, once the runner is through with the
+                // slow one (nothing is sent to a busy runner). Fewer children per element first: a
+                // dense screen (1,500 cells side by side in the gym) is wide, not deep.
+                let smaller = readLimits.smaller
+                let retryUntil = now() + extra
+                reading.notes.append("no element tree (\(readLimits.isFull ? "full" : readLimits.described)): \(e)")
+                if await waitUntilFree(timeout: min(3, retryUntil - now() - 1.5)) {
+                    await useLimits(smaller)
+                    if limits.value == smaller, let again = try? await self.tree(timeout: max(0.5, min(2, retryUntil - now() - 0.2)), format: format) {
+                        reading.elements = again.elements; reading.foreground = again.foreground; treeCame = true
+                        reading.notes.removeLast()
+                        reading.notes.append("the full tree timed out (\(e)), so it was read again with \(smaller.described) within this call; \(smaller.caveat)")
+                    }
+                }
+                if !treeCame { nextLimits.value = smaller }
             } else {
                 reading.notes.append("no element tree: \(e)")
             }
         }
         let treeAt = now()
         if treeCame {
-            if readDepth < 50 { reading.notes.append("the tree was read to depth \(readDepth) (the read before timed out at a greater depth); deeper parts of nested elements may be missing") }
-            if treeAt - started < 1.5, readDepth < 50 { nextDepth.value = min(50, readDepth * 2) }
+            let noteSaysLimits = reading.notes.last?.contains("within this call") ?? false
+            let read = limits.value
+            if !read.isFull, !noteSaysLimits { reading.notes.append("the tree was read with \(read.described) (the read before timed out with more); \(read.caveat)") }
+            if treeAt - started < 1.5, !read.isFull { nextLimits.value = read.larger }
         } else if let last = reading.notes.last, last.contains("did not finish within") || last.contains("did not answer") {
-            nextDepth.value = max(12, readDepth / 2)
+            nextLimits.value = readLimits.smaller
         }
         switch await picturePart {
         case .success(let png)?: reading.png = png
-        case .failure(let e)?: reading.notes.append("no screenshot: \(e)")
+        case .failure(let e)?:
+            // The tree came (on a second try, from a runner that was busy or new) but the picture
+            // taken beside the first try did not: the runner gives it now (seen in the gym). Else
+            // the host's own path, apart from the runner, with up to 6 s of its own (simctl on a CI
+            // simulator took over 2 s).
+            if treeCame, let again = try? await screenshot(timeout: max(0.5, min(1.5, started + timeout + extra - now()))) {
+                reading.png = again
+                reading.notes.append("the screenshot came on the second try (the first: \(e))")
+            } else if let fallback = screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil {
+                reading.png = png
+                reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
+            } else {
+                reading.notes.append("no screenshot: \(e)")
+            }
         case nil: break
         }
         // The tree and the picture are one moment: when the tree came well after the picture (a slow

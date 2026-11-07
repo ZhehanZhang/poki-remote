@@ -139,7 +139,7 @@ func lean(_ elements: [Element], full: Bool) -> [Element] {
 /// One element that says a lot and has nothing listed inside it: an app collapsed a cell (a post with
 /// its buttons) into one element, so its parts cannot be named.
 func isCollapsed(_ e: Element, in all: [Element]) -> Bool {
-    guard !e.fromPicture, e.text.count >= 60, e.frame.height >= 40, !["StaticText", "TextView", "TextField", "SecureTextField", "Keyboard"].contains(e.type) else { return false }
+    guard !e.fromPicture, e.text.count >= 60 || e.type == "WebView", e.frame.height >= 40, !["StaticText", "TextView", "TextField", "SecureTextField", "Keyboard"].contains(e.type) else { return false }
     return !all.contains { e.contains($0) && !$0.text.isEmpty }
 }
 

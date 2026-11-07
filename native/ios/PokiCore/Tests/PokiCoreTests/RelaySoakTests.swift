@@ -54,9 +54,11 @@ final class RelaySoakTests: XCTestCase {
                 try await Task.sleep(nanoseconds: 30_000_000)
             }
             if round % 2 == 1 {
-                // Cut the connection while requests are still running.
-                dropped[round] = Set(plan.filter { $0.socket == round }.map(\.id)).subtracting(answers(socket))
+                // Cut the connection while requests are still running. (Which answers were cut off is
+                // what the socket refused after its close: taking the set before the close raced with
+                // an answer landing in between, seen on CI.)
                 socket.close(code: 1006, reason: "gone")
+                dropped[round] = Set(plan.filter { $0.socket == round }.map(\.id)).subtracting(answers(socket))
             } else {
                 let expected = Set(plan.filter { $0.socket == round && !$0.cancelled }.map(\.id))
                 let done = await eventually(20) { expected.isSubset(of: Set(self.answers(socket))) }
@@ -78,6 +80,8 @@ final class RelaySoakTests: XCTestCase {
             if let cut = dropped[index] {
                 let late = Set(ids).intersection(cut)
                 XCTAssertTrue(late.isEmpty, "answers sent on a closed connection: \(late.sorted())")
+                let refused = socket.sentLate.compactMap { (try? JSON.parse($0))?["id"]?.string }
+                XCTAssertTrue(refused.isEmpty, "answers sent after the close (a kept answer goes with the next call instead): \(refused)")
             }
         }
     }

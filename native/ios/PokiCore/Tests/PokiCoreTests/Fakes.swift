@@ -27,7 +27,7 @@ final class FakeWDA: HTTPTransport, @unchecked Sendable {
     /// The screen as a tree: (type, label, [x, y, w, h], children).
     func tree(_ nodes: [Node], app: String = "X") {
         func json(_ n: Node) -> JSON {
-            ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
+            ["type": .string("XCUIElementType\(n.type)"), "label": n.label.map(JSON.string) ?? .null, "value": n.value.map(JSON.string) ?? .null, "rect": ["x": .number(n.frame[0]), "y": .number(n.frame[1]), "width": .number(n.frame[2]), "height": .number(n.frame[3])], "children": .array(n.children.map(json))]
         }
         let root: JSON = ["type": "XCUIElementTypeApplication", "label": .string(app), "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array(nodes.map(json))]
         set("GET /source") { _ in (200, ["value": root]) }
@@ -100,11 +100,13 @@ struct Node {
     var label: String?
     var frame: [Double]
     var children: [Node] = []
-    init(_ type: String, _ label: String?, _ frame: [Double], _ children: [Node] = []) {
+    var value: String?
+    init(_ type: String, _ label: String?, _ frame: [Double], _ children: [Node] = [], value: String? = nil) {
         self.type = type
         self.label = label
         self.frame = frame
         self.children = children
+        self.value = value
     }
 }
 
@@ -119,6 +121,8 @@ final class FakeHost: CoreHost, @unchecked Sendable {
     func jpeg(fromPNG png: Data, width: Int, quality: Double) throws -> Data { widths.update { $0.append(width) }; return Data("jpeg:\(png.count)".utf8) }
     func runnerState() -> RunnerState { state.value }
     func restartRunner() { restarts.update { $0 += 1 } }
+    let ownScreenshot = LockedBox<Data?>(nil)
+    func screenshotWithoutRunner() async -> Data? { ownScreenshot.value }
 }
 
 /// One end of a fake WebSocket; the test plays the relay on the other end.
@@ -135,7 +139,15 @@ final class FakeSocket: WebSocketConnection, @unchecked Sendable {
         inbox.append(text)
         lock.unlock()
     }
-    func send(_ text: String) async throws { lock.lock(); outbox.append(text); lock.unlock() }
+    /// Sent after the close: a real socket refuses it, and the test lists it.
+    private(set) var late: [String] = []
+    func send(_ text: String) async throws {
+        lock.lock()
+        if closed { late.append(text); lock.unlock(); throw RelayFailure("closed") }
+        outbox.append(text)
+        lock.unlock()
+    }
+    var sentLate: [String] { lock.lock(); defer { lock.unlock() }; return late }
     func receive() async throws -> String {
         try await withCheckedThrowingContinuation { c in
             lock.lock()
