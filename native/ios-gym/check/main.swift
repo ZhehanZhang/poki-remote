@@ -164,7 +164,7 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
 
 /// scroll_to as an agent uses it: PokiCore stops when an action's time runs out and says to call
 /// again to go on; the agent calls again until the text is found or the list is through.
-@MainActor func scrollTo(_ text: String, step: String, budget: Double = 30, max: Int = 8) async -> String {
+@MainActor func scrollTo(_ text: String, step: String, budget: Double = 30, max: Int = 20) async -> String {
     var answer = ""
     for i in 1...max {
         answer = await call(i == 1 ? step : "\(step) (again, \(i))", "do", ["actions": [["scroll_to": .string(text)]]], budget: budget)
