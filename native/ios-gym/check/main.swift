@@ -259,11 +259,12 @@ a = await tap("Twin", in: a, type: "Button", last: true, expect: "Twin tapped")
 
 // 9. A web view filling the screen with one link.
 a = await open("fullscreen")
-// Diagnostic: WDA's raw XML for this screen, to see whether the web view's node is there at all.
+// Diagnostic: WDA's raw XML for this screen, to see whether the web view's parts are there at all.
 if let raw = try? await URLSession.shared.data(from: url.appendingPathComponent("source").appending(queryItems: [URLQueryItem(name: "format", value: "xml")])).0,
-   let xml = String(data: raw, encoding: .utf8) {
-    let lines = xml.split(separator: "\n").filter { $0.contains("WebView") || $0.contains("Link") || $0.contains("web page") || $0.contains("Open") }
-    print("diag: raw XML has \(xml.count) characters; WebView/Link/web page lines (\(lines.count)):\n" + lines.prefix(12).map { String($0.prefix(220)) }.joined(separator: "\n") + "\n")
+   let xml = (try? JSON.parse(raw))?["value"]?.string {
+    func count(_ needle: String) -> Int { xml.components(separatedBy: needle).count - 1 }
+    print("diag: raw XML has \(xml.count) characters; WebView nodes \(count("<XCUIElementTypeWebView")), Link nodes \(count("<XCUIElementTypeLink")), StaticText nodes \(count("<XCUIElementTypeStaticText")), 'A web page' \(count("A web page")), 'Open' \(count("\"Open\""))")
+    if let r = xml.range(of: "<XCUIElementTypeWebView") { print("diag: web view node: " + xml[r.lowerBound...].prefix(600) + "\n") }
 }
 if ref(in: a, "Open") == nil { a = await call("look again at the web view", "look") }
 a = await tap("Open", in: a, expect: "Opened")
