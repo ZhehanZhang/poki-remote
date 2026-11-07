@@ -54,7 +54,7 @@ final class AppModel {
     private var idleTimer: Timer?
     private var launcherConfig: LauncherConfig?
 
-    private let host = AppCoreHost()
+    let host = AppCoreHost()
     private let core: LiveCore
     private let launcher: RunnerLauncher
     private let pairer: DevicePairing
@@ -62,11 +62,10 @@ final class AppModel {
     let log = AppLog.shared
     private var eventsTask: Task<Void, Never>?
 
-    init() {
+    init(launcher: RunnerLauncher = RustLauncher(), pairer: DevicePairing = RustPairing()) {
         core = LiveCore(host: host)
-        let launcher = RustLauncher()
         self.launcher = launcher
-        pairer = RustPairing()
+        self.pairer = pairer
         host.update(key: identity.signingKey, hashes: identity.accessHashes)
         // PokiCore asks for a restart after two silent requests in a row. A slow gesture can be one of
         // them while the runner is fine, so the runner is asked first; only a runner that does not
@@ -211,7 +210,7 @@ final class AppModel {
     /// After a stop, watches the runner until it really ends (and with it the automation banner):
     /// once a second for 30 s. The log says how long it took. If it is still there after 10 s, the
     /// home screen says so, and the notice goes away by itself the moment the runner is gone.
-    private func confirmRunnerEnded() {
+    func confirmRunnerEnded() {
         endCheck += 1
         let check = endCheck
         Task { [weak self] in
@@ -277,7 +276,7 @@ final class AppModel {
     /// The loopback came or went. Going: logged with the time, and the agent's status says so instead
     /// of "Checking pairing". Back: the launcher tries at once instead of waiting out its backoff
     /// (the runner dies with the tunnel, so every drop costs a restart).
-    private func loopbackChanged(from old: LoopbackMonitor.State, to new: LoopbackMonitor.State) {
+    func loopbackChanged(from old: LoopbackMonitor.State, to new: LoopbackMonitor.State) {
         let wasWorking = { if case .working = old { true } else { false } }()
         if wasWorking, !loopback.isWorking {
             log.add("loopback", "dropped: 10.7.0.1 stopped answering (\(loopback.text)); the runner cannot survive this")
@@ -290,7 +289,7 @@ final class AppModel {
 
     /// The runner's state as the agent reads it. While the loopback is down, every pre-launch state
     /// is the same thing: waiting for the tunnel, said with the time it went and what to do.
-    private func coreState(of status: RunnerStatus) -> RunnerState {
+    func coreState(of status: RunnerStatus) -> RunnerState {
         let preLaunch = ["connecting", "pairing", "tunnel", "waiting_network", "standby", "idle"].contains(status.state)
         if preLaunch, !loopback.isWorking, loopback.state != .checking || status.state == "waiting_network" {
             let since = loopback.droppedAt.map { " since \(Self.clock.string(from: $0))" } ?? ""
@@ -301,7 +300,7 @@ final class AppModel {
     }
     private static let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
 
-    private func runnerChanged(_ status: RunnerStatus) {
+    func runnerChanged(_ status: RunnerStatus) {
         if status != runner { log.add("runner", "\(status.state)\(status.detail.map { ": \($0)" } ?? "")") }
         // Events from a launcher that was stopped for idle are old news.
         guard !runnerPaused else { return }

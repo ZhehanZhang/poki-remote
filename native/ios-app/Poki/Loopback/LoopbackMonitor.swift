@@ -75,6 +75,18 @@ final class LoopbackMonitor {
         }
     }
 
+    #if DEBUG
+    /// Tests: set the state as a probe result would, running the change hook.
+    func simulate(_ next: State) {
+        let old = state
+        guard !Self.same(next, state) else { return }
+        state = next; checkedAt = Date()
+        if case .working = old, !isWorking { droppedAt = Date() }
+        if isWorking { droppedAt = nil }
+        onChange?(old, next)
+    }
+    #endif
+
     var text: String {
         switch state {
         case .checking: "Checking…"

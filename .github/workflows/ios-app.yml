@@ -116,6 +116,7 @@ jobs:
           RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys;r=[x for x in json.load(sys.stdin)["runtimes"] if x["isAvailable"] and x["platform"]=="iOS"];print(r[-1]["identifier"])')
           TYPE=$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys;d=[x for x in json.load(sys.stdin)["devicetypes"] if x["name"].startswith("iPhone") and "Pro" in x["name"] and "Max" not in x["name"]];print(d[-1]["identifier"])')
           UDID=$(xcrun simctl create poki-smoke "$TYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" "$APP"
           mkdir -p out/simulator
@@ -164,6 +165,17 @@ jobs:
             crashed=1
           fi
           [ "$crashed" = 0 ] || exit 1
+
+      # The app's own logic against a fake launcher: tunnel loss named to the agent, pairing
+      # refusal and acceptance, the agent's view of the runner.
+      - name: App unit tests (simulator)
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          xcodebuild test -project native/ios-app/Poki.xcodeproj -scheme Poki -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/sim \
+            -only-testing:PokiTests CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/tests.log | grep -E "Test Case|error:|failed|passed|TEST (SUCCEEDED|FAILED)|\*\* " 
+          grep -q "TEST SUCCEEDED" build/tests.log
 
       - uses: actions/upload-artifact@v4
         with:

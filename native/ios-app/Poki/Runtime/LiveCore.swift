@@ -67,6 +67,8 @@ final class AppCoreHost: CoreHost, @unchecked Sendable {
 
     func update(key: Curve25519.Signing.PrivateKey?, hashes: [String]) { lock.withLock { self.key = key; self.hashes = hashes } }
     func update(runner: RunnerState) { lock.withLock { self.runner = runner } }
+    /// The state as last given, without the wake side effect of `runnerState()` (tests).
+    var currentRunner: RunnerState { lock.withLock { runner } }
     func onRestart(_ action: @escaping @Sendable () -> Void) { lock.withLock { restart = action } }
     func onWake(_ action: @escaping @Sendable () -> Void) { lock.withLock { wake = action } }
     /// The runner was stopped while idle (or by the owner): the next tool call starts it again.
