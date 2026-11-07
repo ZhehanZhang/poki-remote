@@ -260,14 +260,20 @@ extension Computer {
             // starts it through XCTest's launch. Otherwise the app is activated: brought to the front
             // as it is, or started if it is not running. XCTest's launch always ends a running app
             // and starts it again, with a handshake that takes several seconds on the phone.
+            var note = ""
             if fresh {
-                do { _ = try await runner.call("POST", "/wda/apps/terminate", ["bundleId": .string(bundle)], timeout: 4) }
+                // Ending a running app through XCTest can take over 4 s on the simulator (seen in
+                // CI: a fresh launch gave up at the terminate and Settings never came). A slow end
+                // is not a miss, and the launch goes anyway: it queues behind the end and runs
+                // after it, within the launch's own time.
+                do { _ = try await runner.call("POST", "/wda/apps/terminate", ["bundleId": .string(bundle)], timeout: 6, countsAsMiss: false) }
                 catch let e as RunnerError where e.delivery == .notSent {}
-                _ = try await runner.call("POST", "/wda/apps/launch", ["bundleId": .string(bundle)], timeout: 8)
+                catch let e as RunnerError { note = "; ending the app first did not answer in time (\(e.message)); the launch was sent anyway" }
+                _ = try await runner.call("POST", "/wda/apps/launch", ["bundleId": .string(bundle)], timeout: max(3, min(8, until - now() - 0.3)))
             } else {
                 _ = try await runner.call("POST", "/wda/apps/activate", ["bundleId": .string(bundle)], timeout: 8)
             }
-            return ("launch", "launch \(bundle)\(fresh ? " (fresh)" : "")")
+            return ("launch", "launch \(bundle)\(fresh ? " (fresh)" : "")\(note)")
         }
         if let spec = action["wait_until"] {
             return ("wait_until", try await waitUntil(spec, until: until))

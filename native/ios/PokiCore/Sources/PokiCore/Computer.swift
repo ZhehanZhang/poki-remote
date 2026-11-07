@@ -464,7 +464,8 @@ final class Computer: @unchecked Sendable {
         var lastKind: String?
         for (i, action) in actions.enumerated() {
             let index = offset + i
-            let cap = action["launch"] != nil ? max(config.actionCap, 9) : config.actionCap
+            // A launch gets 9 s; a fresh one (the app ended first, up to 6 s on its own) 14 s.
+            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : config.actionCap
             let actionsUntil = min(until - config.readTimeout - 0.5, now() + cap)
             let left = actionsUntil - now()
             if left < 0.3 {
