@@ -121,6 +121,11 @@ jobs:
           cat > build/start-wda.sh <<EOS
           #!/bin/bash
           cd "$GITHUB_WORKSPACE"
+          # One test session at a time: xcodebuild relaunches a killed runner by itself ("Restarting
+          # after unexpected exit") and two sessions on one simulator end each other.
+          pkill -f "WebDriverAgentRunner.*test-without-building" 2>/dev/null || true
+          sleep 2
+          xcrun simctl terminate "$UDID" com.facebook.WebDriverAgentRunner.xctrunner 2>/dev/null || true
           nohup xcodebuild -project build/wda/WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -destination "id=$UDID" -derivedDataPath build/wda-dd test-without-building >> build/wda.log 2>&1 &
           for i in \$(seq 1 150); do curl -sf http://127.0.0.1:8100/status > /dev/null && echo "WDA up after \$((i * 2)) s" && exit 0; sleep 2; done
           echo "WDA did not come up"; exit 1

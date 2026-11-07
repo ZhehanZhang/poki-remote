@@ -25,7 +25,20 @@ final class Host: CoreHost, @unchecked Sendable {
         return out as Data
     }
     func runnerState() -> RunnerState { .running }
-    func restartRunner() {}
+    /// As the app's launcher: PokiCore asks once the runner stops answering; the start script brings
+    /// WebDriverAgent back (POKI_WDA_START), at most once every 20 s.
+    private let lock = NSLock()
+    private var lastRestart = Date.distantPast
+    func restartRunner() {
+        guard let script = ProcessInfo.processInfo.environment["POKI_WDA_START"] else { return }
+        let due = lock.withLock { () -> Bool in
+            guard Date().timeIntervalSince(lastRestart) > 20 else { return false }
+            lastRestart = Date(); return true
+        }
+        guard due else { return }
+        print("host: restarting the runner with \(script)")
+        DispatchQueue.global().async { print(sh(["bash", script])) }
+    }
 }
 
 let env = ProcessInfo.processInfo.environment
@@ -111,13 +124,25 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
     return Int(head)
 }
 
-/// Opens a Gym scenario by URL and reads it; the title "Gym: <name>" must be on screen.
+/// Opens a Gym scenario the way an agent would: back to the menu (the Menu button, or a fresh
+/// launch), tap the scenario's row, and read; the title "Gym: <name>" must be on screen. (simctl
+/// openurl is not used: from outside the app it raises an "Open in Poki Gym?" system alert.)
 @MainActor func open(_ name: String) async -> String {
     scenario = name
-    sh(["xcrun", "simctl", "openurl", udid, "pokigym://\(name)"])
-    try? await Task.sleep(nanoseconds: 700_000_000)
     var answer = await call("look", "look")
-    if !answer.contains("Gym: \(name)") { answer = await call("look (again)", "look") }
+    if !answer.contains("Gym: menu") {
+        if let menu = ref(in: answer, "\"Menu\"", type: "Button") {
+            answer = await call("tap Menu", "do", ["actions": [["tap": .number(Double(menu))]]])
+        } else {
+            answer = await call("launch Poki Gym fresh", "do", ["actions": [["launch": ["bundle": .string(gymBundle), "fresh": true]]]])
+        }
+    }
+    if ref(in: answer, "\"\(name)", type: "Button") == nil { answer = await call("look at the menu", "look") }
+    guard let row = ref(in: answer, "\"\(name)", type: "Button") else {
+        check(false, "the \(name) row is on the menu"); return answer
+    }
+    answer = await call("open \(name)", "do", ["actions": [["tap": .number(Double(row))]]])
+    if !answer.contains("Gym: \(name)") { answer = await call("look at \(name)", "look") }
     check(answer.contains("Gym: \(name)"), "the \(name) screen is in front")
     return answer
 }
@@ -238,13 +263,13 @@ let dead = await call("look with the runner dead", "look", budget: 30)
 check(!dead.contains("HUNG"), "a look with a dead runner answers")
 let deadDo = await call("do with the runner dead", "do", ["actions": [["swipe": "up"]]], budget: 30)
 check(!deadDo.contains("HUNG") && !deadDo.contains("did: swipe"), "a do with a dead runner answers and sends nothing")
-if let start = env["POKI_WDA_START"] {
-    print(sh(["bash", start]))
+if env["POKI_WDA_START"] != nil {
+    // PokiCore asked the host to restart the runner; the look must come back by itself.
     var back = ""
-    for i in 1...6 {
+    for i in 1...20 {
         back = await call("look after the runner restart (\(i))", "look", budget: 30)
         if back.contains("Gym:") { break }
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
     }
     check(back.contains("Gym:"), "look works again once the runner is back")
     let afterDo = await call("do after the runner restart", "do", ["actions": [["swipe": "up"]]])
