@@ -25,6 +25,14 @@ final class Host: CoreHost, @unchecked Sendable {
         return out as Data
     }
     func runnerState() -> RunnerState { .running }
+    /// The simulator's own screenshot, as the launcher's DVT screenshot on a phone: a path to a
+    /// picture that a wedged app cannot block.
+    func screenshotWithoutRunner() async -> Data? {
+        let path = NSTemporaryDirectory() + "poki-gym-\(UUID().uuidString).png"
+        sh(["xcrun", "simctl", "io", udid, "screenshot", path])
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        return FileManager.default.contents(atPath: path)
+    }
     /// As the app's launcher: PokiCore asks once the runner stops answering; the start script brings
     /// WebDriverAgent back (POKI_WDA_START), at most once every 20 s.
     private let lock = NSLock()
