@@ -189,7 +189,7 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
 
 _ = await rpc("initialize", ["protocolVersion": "2025-06-18", "capabilities": .object([:]), "clientInfo": ["name": "poki-gym-check", "version": "1"]])
 await call("look (cold)", "look")
-let launched = await call("launch Poki Gym fresh", "do", ["actions": [["launch": ["bundle": .string(gymBundle), "fresh": true]]]])
+let launched = await call("launch Poki Gym fresh", "do", ["actions": [["launch": ["bundle": .string(gymBundle), "fresh": true]]]], budget: 25)
 var menu = launched.contains("Gym: menu") ? launched : await call("look (menu)", "look")
 check(menu.contains("Gym: menu"), "Poki Gym is in front after launch")
 
@@ -222,6 +222,14 @@ if let field = ref(in: a, "Paste here") {
     check(shown.contains("hello gym 123"), "typed text is read back from the field")
     check(!shown.lowercased().contains("paste prompt") || shown.contains("hello gym 123"), "no paste prompt stops the typing")
 } else { check(false, "the text field is listed") }
+
+// A fresh simulator shows the keyboard's slide-to-type introduction over the keys after the first
+// typing; a phone in use never does. Dismissed here so it does not sit over later screens.
+scenario = "keyboard intro"
+let intro = await call("look for the keyboard intro", "look")
+if let cont = ref(in: intro, "Continue", type: "Button") {
+    _ = await call("tap Continue on the keyboard intro", "do", ["actions": [["tap": .number(Double(cont))]]])
+}
 
 // 4. A long list: scroll_to by text, then tap.
 a = await open("list")
@@ -266,7 +274,12 @@ if let raw = try? await URLSession.shared.data(from: url.appendingPathComponent(
     print("diag: raw XML has \(xml.count) characters; WebView nodes \(count("<XCUIElementTypeWebView")), Link nodes \(count("<XCUIElementTypeLink")), StaticText nodes \(count("<XCUIElementTypeStaticText")), 'A web page' \(count("A web page")), 'Open' \(count("\"Open\""))")
     if let r = xml.range(of: "<XCUIElementTypeWebView") { print("diag: web view node: " + xml[r.lowerBound...].prefix(600) + "\n") }
 }
-if ref(in: a, "Open") == nil { a = await call("look again at the web view", "look") }
+// The web view's parts reach the tree a few seconds after the page loads; PokiCore says so and
+// the agent reads again, as here (up to four times, a second apart).
+for i in 1...4 where ref(in: a, "Open") == nil {
+    try? await Task.sleep(nanoseconds: 1_000_000_000)
+    a = await call("look again at the web view (\(i))", "look")
+}
 a = await tap("Open", in: a, expect: "Opened")
 
 // 10. A navigation push and the system back button.
