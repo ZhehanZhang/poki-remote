@@ -140,7 +140,7 @@ private struct IslandExpandedFrame: View {
             IslandBottom(state: state)
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 14)
+        .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 22)
         .frame(maxWidth: 371)
         .background(.black, in: .rect(cornerRadius: 44, style: .continuous))
         .overlay(alignment: .top) { Capsule().fill(Color(white: 0.08)).frame(width: 120, height: 36).padding(.top, 14) }

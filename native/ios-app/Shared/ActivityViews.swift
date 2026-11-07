@@ -6,10 +6,11 @@ import WidgetKit
 /// The Live Activity's views.
 ///
 /// Sizes (HIG, iPhone): Lock Screen and expanded island are 371-408 points wide and at most 160
-/// points tall; anything taller is cut. The Lock Screen card has large rounded corners, so content
-/// keeps the same 16 points from every edge, and stays within 128 points of
-/// height. The expanded island also spends ~44 points on its leading/trailing row, so its bottom
-/// region stays within ~90 points.
+/// points tall; anything taller is cut. Both have deep continuous corners (the island's about 40 pt
+/// on iOS 27; the owner's phone showed the bear, the status pill and the last line cut at 16 pt),
+/// so the content keeps 22 points from the sides and 18 from the top and bottom on the Lock Screen,
+/// within 124 points of height, and the widget gives the expanded island 24/18/22 point margins.
+/// Anything that sits in a corner is itself rounded (bear tile, pills, buttons, thumbnail).
 ///
 /// Two sizes of pop-up, as the owner asked: an action (each step) expands the island to a small
 /// card, one or two lines of plain text; an approval expands it to the large card with Deny and
@@ -29,8 +30,8 @@ enum Brand {
 
 /// Lock Screen padding (see the comment at the top).
 enum LockInsets {
-    static let horizontal: CGFloat = 16
-    static let vertical: CGFloat = 16
+    static let horizontal: CGFloat = 22
+    static let vertical: CGFloat = 18
 }
 
 extension PokiState {
@@ -209,13 +210,13 @@ struct ActivityRunCard: View {
             if tall {
                 if state.hasThumbnail {
                     Thumbnail(version: state.thumbnailVersion, accent: state.phase == .done ? Brand.done : .white.opacity(0.25))
-                        .frame(width: 54, height: 116)
+                        .frame(width: 50, height: 108)
                 } else {
-                    PhaseGlyph(state: state).frame(width: 54, height: 116)
+                    PhaseGlyph(state: state).frame(width: 50, height: 108)
                 }
             }
         }
-        .frame(height: tall ? 116 : nil)
+        .frame(height: tall ? 108 : nil)
     }
 }
 
@@ -361,9 +362,11 @@ struct ActivityApprovalCard: View {
                     .font(.system(size: 16, weight: .semibold))
                     .lineLimit(2).minimumScaleFactor(0.8)
                     .fixedSize(horizontal: false, vertical: true)
-                DrainBar(from: state.approvalSince ?? approval.expires.addingTimeInterval(-120), to: approval.expires)
-                    .padding(.top, 8)
-                ApprovalButtons(approval: approval).padding(.top, 10)
+                if !island {
+                    DrainBar(from: state.approvalSince ?? approval.expires.addingTimeInterval(-120), to: approval.expires)
+                        .padding(.top, 8)
+                }
+                ApprovalButtons(approval: approval, height: island ? 32 : 36).padding(.top, island ? 8 : 10)
             }
         } else {
             ActivityRunCard(state: state)
@@ -407,11 +410,12 @@ struct DrainBar: View {
 
 struct ApprovalButtons: View {
     var approval: PendingApproval
+    var height: CGFloat = 36
     var body: some View {
         HStack(spacing: 10) {
             Button(intent: DenyActionIntent(approvalID: approval.id)) {
                 Text("Deny").font(.system(size: 15, weight: .semibold))
-                    .frame(maxWidth: .infinity).frame(height: 36)
+                    .frame(maxWidth: .infinity).frame(height: height)
                     .background(.white.opacity(0.16), in: .capsule)
                     .foregroundStyle(.white)
             }
@@ -421,7 +425,7 @@ struct ApprovalButtons: View {
                     Image(systemName: "faceid").font(.system(size: 13, weight: .semibold))
                     Text("Allow").font(.system(size: 15, weight: .semibold))
                 }
-                .frame(maxWidth: .infinity).frame(height: 36)
+                .frame(maxWidth: .infinity).frame(height: height)
                 .background(Brand.done, in: .capsule)
                 .foregroundStyle(.black)
             }
@@ -510,7 +514,7 @@ struct IslandLeading: View {
     var state: PokiState
     var body: some View {
         HStack(spacing: 8) {
-            BearMark(size: 28)
+            BearMark(size: 24)
             VStack(alignment: .leading, spacing: 0) {
                 Text("Poki").font(.system(size: 14, weight: .semibold))
                 if let sub = state.appLine ?? state.guide.map({ String(localized: "Step \($0.number) of \($0.count)") }) {
