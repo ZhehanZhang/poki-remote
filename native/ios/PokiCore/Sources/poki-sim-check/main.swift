@@ -105,6 +105,9 @@ let dragged = await call("drag up 300 points", "do", ["actions": [["drag": [200,
 check(dragged.contains("screen_changed: true"), "a drag scrolls Settings")
 let found = await call("scroll_to Privacy", "do", ["actions": [["scroll_to": "Privacy"]]])
 check(found.contains("found at"), "scroll_to finds Privacy")
+// The list settles first: a wait right after the scroll reads the deceleration as a change.
+let waited = await call("wait_until settled", "do", ["actions": [["wait_until": "settled"]]])
+check(waited.contains("wait_until: the screen held still"), "wait_until settled")
 let same = await call("no-op wait", "do", ["actions": [["wait": 300]]])
 // Simulator tolerance: the drag's scroll indicator can still be fading when this read comes, so a
 // picture-only change confined to a strip at the right edge, under 5 % of the picture, passes.
@@ -113,8 +116,6 @@ let smallStrip = same.range(of: #"only the picture changed, in ([0-9]+) % of it,
     return parts.count >= 5 && parts[0] < 5 && parts[1] > 350 && parts[3] <= 40
 } ?? false
 check(same.contains("screen_changed: false") || smallStrip, "nothing done: screen_changed false (or only the scroll indicator faded)")
-let waited = await call("wait_until settled", "do", ["actions": [["wait_until": "settled"]]])
-check(waited.contains("wait_until: the screen held still"), "wait_until settled")
 await call("swipe down to the top", "do", ["actions": [["swipe": "down"], ["swipe": "down"]]])
 // Diagnostic only: how long Vision's text recognition takes here on a whole screenshot (the fallback
 // when the tree is late gets up to 3.5 s).
@@ -138,6 +139,12 @@ if let searchRef, let ref = Int(searchRef) {
     for attempt in 1...4 {
         let after = await call(attempt == 1 ? "look at the field" : "look at the field (\(attempt))", "look")
         reads.append(after)
+        // The keyboard's first-use intro (QuickPath, "Continue") on a fresh simulator: dismissed as
+        // an agent would, then the field is read again.
+        if let intro = ref(in: after, "Button \"Continue\""), after.contains("UIContinuousPathIntroductionView") {
+            reads.append(await call("dismiss the keyboard intro", "do", ["actions": [["tap": .number(Double(intro))]]]))
+            continue
+        }
         if !after.contains("no element tree") { break }
     }
     // With the tree late, the text read from the picture stands in; it must show the typed text.

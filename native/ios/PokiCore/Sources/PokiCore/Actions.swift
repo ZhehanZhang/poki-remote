@@ -318,7 +318,10 @@ extension Computer {
         let deadline = now() + seconds
         while true {
             if await focusedField(timeout: 1) != nil { return true }
-            if now() >= deadline { return false }
+            // A focus query the runner did not answer in time is still being served: another would
+            // only queue behind it (seen on the CI simulator: the keyboard's first-use intro held one
+            // GET /element/active for 19 s, and the polls behind it went down with the runner).
+            if now() >= deadline || runner.busyWith != nil { return false }
             await sleep(seconds: 0.15)
         }
     }
