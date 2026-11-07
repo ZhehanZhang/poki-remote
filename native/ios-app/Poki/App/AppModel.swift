@@ -368,11 +368,20 @@ final class AppModel {
         }, ApprovalMailbox.stopRunner as CFString, nil, .deliverImmediately)
     }
 
+    /// A decision from the Live Activity. Allow is tapped on the expanded Dynamic Island, which takes
+    /// about a second to collapse; input sent at once can land on it (iOS then opens Poki). So the
+    /// Live Activity's decisions reach PokiCore after a short pause, the app's own buttons at once.
     func drainApprovals() {
-        for (id, approved) in ApprovalMailbox.drain() where approvals.contains(where: { $0.id == id }) {
-            core.resolveApproval(id: id, approved: approved)
+        let decisions = ApprovalMailbox.drain().filter { id, _ in approvals.contains(where: { $0.id == id }) }
+        guard !decisions.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.islandCollapse))
+            for (id, approved) in decisions { core.resolveApproval(id: id, approved: approved) }
         }
     }
+
+    /// How long the expanded island takes to fold after a tap on its button.
+    static let islandCollapse: TimeInterval = 1.5
 
     // MARK: Pairing
 
