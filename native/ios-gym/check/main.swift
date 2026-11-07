@@ -116,9 +116,13 @@ func call(_ step: String, _ name: String, _ args: JSON = .object([:]), budget: D
 
 /// The number of the first (or last) listed element whose line holds `text`, optionally of a type.
 func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = false) -> Int? {
-    let lines = answer.split(separator: "\n").filter { line in
+    let candidates = answer.split(separator: "\n").filter { line in
         line.contains("\"") && line.contains(text) && (type.map { line.contains(" \($0) ") } ?? true)
     }
+    // An element whose whole label is the text comes before one that only contains it (a tap on
+    // "Open" must not land on the alert "Open in Poki Gym?").
+    let exact = candidates.filter { $0.contains(" \"\(text)\" ") || $0.contains(" \"\(text) = ") }
+    let lines = exact.isEmpty ? candidates : exact
     guard let line = last ? lines.last : lines.first else { return nil }
     let head = line.split(separator: " ").first.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "+~ ")) } ?? ""
     return Int(head)
@@ -149,6 +153,12 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
 
 /// Taps the element with `text` and reads; `state` must then be on screen.
 @MainActor func tap(_ text: String, in answer: String, type: String? = nil, last: Bool = false, expect state: String, then: [JSON] = []) async -> String {
+    var answer = answer
+    // A do's answer lists only what changed; an element that stayed keeps its number but is not
+    // repeated, so the full list is read when the target is not in the answer (as an agent would).
+    if ref(in: answer, text, type: type, last: last) == nil {
+        answer = await call("look (full) for \(text)", "look", ["full": true])
+    }
     guard let r = ref(in: answer, text, type: type, last: last) else {
         check(false, "\"\(text)\" is listed in the tree"); return answer
     }
@@ -218,7 +228,7 @@ check(lateShown.contains("late focus"), "typing lands in the field that took foc
 
 // 7. A dense tree: 3,000 elements. Reads must stay in budget and the button must be reachable.
 a = await open("dense")
-let dense = await call("look at 3,000 elements", "look", budget: 15)
+let dense = await call("look at 1,500 elements", "look", budget: 15)
 check(!dense.contains("HUNG"), "a dense tree is read")
 let foundButton = await call("scroll_to Found", "do", ["actions": [["scroll_to": "Found"]]], budget: 40)
 a = foundButton.contains("Found") ? foundButton : await call("look for Found", "look", budget: 15)

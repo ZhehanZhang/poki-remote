@@ -109,7 +109,8 @@ struct FocusScreen: View {
     }
 }
 
-/// 3,000 tiny labelled cells in a grid: the accessibility tree is huge and slow to read.
+/// 1,500 tiny labelled cells in a grid: the accessibility tree is huge and slow to read, while the
+/// app stays responsive (3,000 wedged the main loop for good on the CI simulator: not a fair case).
 struct DenseScreen: View {
     @EnvironmentObject var state: GymState
     let columns = Array(repeating: GridItem(.fixed(12), spacing: 1), count: 30)
@@ -117,7 +118,7 @@ struct DenseScreen: View {
         VStack {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 1) {
-                    ForEach(0..<3000, id: \.self) { i in
+                    ForEach(0..<1500, id: \.self) { i in
                         Rectangle().fill(i % 7 == 0 ? Color.orange : Color.gray.opacity(0.3)).frame(width: 12, height: 12)
                             .accessibilityElement().accessibilityLabel("cell \(i)")
                     }

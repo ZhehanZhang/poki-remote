@@ -13,7 +13,7 @@ Open a scenario with `xcrun simctl openurl <udid> pokigym://<scenario>`, or from
 | list | 300 rows "Row n"; tapping Row 250 sets the state |
 | sheet | Open sheet shows a half sheet with Done |
 | focus | Start arms a field that takes focus 1.5 s later |
-| dense | 3,000 labelled cells, so the tree is large and slow; a Found button below |
+| dense | 1,500 labelled cells, so the tree is large and slow; a Found button below |
 | dup | Two elements labelled Twin with the same frame over the real Twin button |
 | fullscreen | A WKWebView filling the screen with one link, Open, that sets its title to Opened |
 | nav | Push opens a page with the system back button; back sets "state: popped" |

@@ -34,7 +34,7 @@ enum Scenario: String, CaseIterable, Identifiable {
         case .list: "300 rows; Row 250 sets the state"
         case .sheet: "A half sheet with a Done button"
         case .focus: "A field that takes focus 1.5 s after Start"
-        case .dense: "3,000 small elements, a slow tree"
+        case .dense: "1,500 small elements, a slow tree"
         case .dup: "Two elements with one label and frame over a Twin button"
         case .fullscreen: "A web view filling the screen with one link"
         case .nav: "Push a page with a system back button"
