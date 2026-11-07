@@ -137,7 +137,15 @@ final class FakeSocket: WebSocketConnection, @unchecked Sendable {
         inbox.append(text)
         lock.unlock()
     }
-    func send(_ text: String) async throws { lock.lock(); outbox.append(text); lock.unlock() }
+    /// Sent after the close: a real socket refuses it, and the test lists it.
+    private(set) var late: [String] = []
+    func send(_ text: String) async throws {
+        lock.lock()
+        if closed { late.append(text); lock.unlock(); throw RelayFailure("closed") }
+        outbox.append(text)
+        lock.unlock()
+    }
+    var sentLate: [String] { lock.lock(); defer { lock.unlock() }; return late }
     func receive() async throws -> String {
         try await withCheckedThrowingContinuation { c in
             lock.lock()
