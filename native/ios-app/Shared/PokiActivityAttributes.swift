@@ -8,7 +8,9 @@ struct PokiActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         /// `done` is set by ActivityController itself when the agent has been quiet for a while after a
         /// run of steps; the app never needs to set it.
-        enum Phase: String, Codable, Hashable { case idle, working, approval, pairing, setup, problem, done }
+        /// `handoff`: the agent cannot act on this screen (a passcode, a verification, a payment) and
+        /// the person has to; the agent keeps polling meanwhile. See `Handoff`.
+        enum Phase: String, Codable, Hashable { case idle, working, approval, pairing, setup, problem, done, handoff }
         var phase: Phase
         /// What the agent is doing, in a few words ("Reading Settings").
         var headline: String
@@ -20,6 +22,8 @@ struct PokiActivityAttributes: ActivityAttributes {
         var thumbnailVersion: Int
         /// A pending approval, if any. Its buttons are App Intents; see ApprovalIntents.swift.
         var approval: PendingApproval?
+        /// What the person has to do themselves, while phase is `handoff`.
+        var handoff: Handoff?
         /// The pairing PIN while on-device pairing is waiting for it.
         var pin: String?
         /// The runner is stopped while no agent uses the phone (no automation banner); the next
@@ -47,6 +51,17 @@ struct PokiActivityAttributes: ActivityAttributes {
         enum Kind: String, Codable, Hashable { case started, app, step, finished, approved, denied, expired, problem, paired, code }
         var kind: Kind
         var text: String
+    }
+    /// The agent (or the runner's launch) handed a screen to the person. `kind` picks the words and
+    /// the symbol; `text` is the agent's own one-line note of what is needed, if any. The person taps
+    /// Done on the Live Activity when finished (HandoffDoneIntent), which the app passes on to PokiCore.
+    struct Handoff: Codable, Hashable {
+        enum Kind: String, Codable, Hashable { case runnerPasscode, passcode, password, verification, payment, other }
+        var id: String
+        var kind: Kind
+        var text: String?
+        var app: String?
+        var since: Date
     }
     struct Step: Codable, Hashable {
         var text: String

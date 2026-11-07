@@ -121,7 +121,7 @@ final class ActivityController {
         let now = Date()
 
         // A new run of steps: from anything that is not already a run.
-        let runPhases: Set<PokiState.Phase> = [.working, .approval]
+        let runPhases: Set<PokiState.Phase> = [.working, .approval, .handoff]
         if state.phase == .working, !runPhases.contains(old.phase) {
             state.stepCount = 0; state.failedCount = 0; state.endedAt = nil; state.steps = []
             if state.since == nil { state.since = now }
@@ -138,6 +138,15 @@ final class ActivityController {
         if runPhases.contains(state.phase), let app = state.app, let before = old.app, app != before {
             setEvent(.app, String(localized: "Now in \(app)"))
             // No pop-up: the runner is in the middle of acting.
+        }
+        // Your turn: the agent handed the screen to the person. Pops up and lights the screen; the
+        // runner sends nothing while it waits, so the expanded island is safe. The run goes on after.
+        if let handoff = state.handoff, handoff.id != old.handoff?.id {
+            setEvent(.handoff, String(localized: "Your turn"))
+            alert = critical(handoff.title, handoff.detail)
+        }
+        if state.handoff == nil, old.handoff != nil, state.phase == .working {
+            setEvent(.resumed, String(localized: "Carrying on"))
         }
         // Approval: always pops up and lights the screen.
         if let approval = state.approval, approval.id != old.approval?.id {
@@ -170,7 +179,7 @@ final class ActivityController {
         }
         if state.stepCount != old.stepCount { inStep = false }
         // The finish timer: re-armed by every change during a run; never fires in the middle of a step.
-        if state.phase == .working, state.approval == nil, state.stepCount > 0 { armFinish() } else { finishTimer?.cancel() }
+        if state.phase == .working, state.approval == nil, state.handoff == nil, state.stepCount > 0 { armFinish() } else { finishTimer?.cancel() }
         return alert
     }
 
@@ -267,7 +276,7 @@ final class ActivityController {
 
     private func content() -> ActivityContent<PokiActivityAttributes.ContentState> {
         // Approvals are urgent; everything else is not. An approval goes stale when it expires.
-        ActivityContent(state: state, staleDate: state.approval?.expires, relevanceScore: state.approval == nil ? 50 : 100)
+        ActivityContent(state: state, staleDate: state.approval?.expires, relevanceScore: state.approval == nil && state.handoff == nil ? 50 : 100)
     }
 
     private static func shrink(_ data: Data, maxPixels: Int) -> Data? {

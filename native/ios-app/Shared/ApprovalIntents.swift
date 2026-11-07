@@ -48,10 +48,38 @@ struct StopRunnerIntent: LiveActivityIntent {
     }
 }
 
+/// Done on the Live Activity's "your turn" card: the person finished what the agent could not do
+/// (a passcode, a verification, a payment). The app passes it on to PokiCore, which tells the agent.
+/// No authentication: it only says "carry on".
+struct HandoffDoneIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "Done, carry on"
+    static let isDiscoverable = false
+
+    @Parameter(title: "Handoff") var handoffID: String
+
+    init() {}
+    init(handoffID: String) { self.handoffID = handoffID }
+
+    func perform() async throws -> some IntentResult {
+        SharedContainer.defaults.set(handoffID, forKey: ApprovalMailbox.handoffKey)
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(ApprovalMailbox.handoffDone as CFString), nil, nil, true)
+        return .result()
+    }
+}
+
 /// Decisions in flight between the intent and the app.
 enum ApprovalMailbox {
     static let notification = "nz.zheha.poki.approval"
     static let stopRunner = "nz.zheha.poki.stop-runner"
+    static let handoffDone = "nz.zheha.poki.handoff-done"
+    static let handoffKey = "handoff.done"
+
+    /// The id of the handoff the person marked done, once.
+    static func drainHandoffDone() -> String? {
+        let id = SharedContainer.defaults.string(forKey: handoffKey)
+        SharedContainer.defaults.removeObject(forKey: handoffKey)
+        return id
+    }
     private static let key = "approval.decisions"
 
     static func post(id: String, approved: Bool) {

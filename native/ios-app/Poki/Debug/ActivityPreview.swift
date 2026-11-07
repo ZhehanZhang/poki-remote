@@ -67,6 +67,14 @@ struct ActivityPreview: View {
         approval.since = now.addingTimeInterval(-61)
         approval.stepCount = 4
 
+        var yourTurn = PokiState(phase: .handoff, headline: "Your turn", thumbnailVersion: 1)
+        yourTurn.app = "Amazon"
+        yourTurn.since = now.addingTimeInterval(-95)
+        yourTurn.stepCount = 9
+        yourTurn.handoff = .init(id: "h1", kind: .payment, text: "Confirm the $42.10 order with Face ID", app: "Amazon", since: now.addingTimeInterval(-20))
+        var passcode = PokiState(phase: .handoff, headline: "Your turn", thumbnailVersion: 0)
+        passcode.handoff = .init(id: "h2", kind: .runnerPasscode, text: nil, app: nil, since: now.addingTimeInterval(-6))
+
         var done = PokiState(phase: .done, headline: "Finished in Messages", thumbnailVersion: 1)
         done.app = "Messages"
         done.since = now.addingTimeInterval(-84); done.endedAt = now
@@ -88,7 +96,7 @@ struct ActivityPreview: View {
         var setup = PokiState(phase: .setup, headline: "Setting up Poki", thumbnailVersion: 0)
         setup.guide = .init(number: 2, count: 6, title: SetupStep.developerMode.title, hint: SetupStep.developerMode.hint)
 
-        return [("start", start), ("working", working), ("step", step), ("approval", approval), ("done", done), ("ready", ready), ("idle", idle),
+        return [("start", start), ("working", working), ("step", step), ("approval", approval), ("yourturn", yourTurn), ("passcode", passcode), ("done", done), ("ready", ready), ("idle", idle),
                 ("problem", problem), ("pairing", pairWait), ("code", pairCode), ("setup", setup)]
     }()
 
