@@ -85,9 +85,11 @@ final class Computer: @unchecked Sendable {
             // Nothing came back: say what was sent and what the runner is doing, and nothing else.
             let state = host.runnerState()
             let did = did.map { $0.replacingOccurrences(of: "(sent,", with: "(sent, not confirmed: no read after it,") }
-            let lines = ["read: failed (\(notes.joined(separator: "; ")))", "runner: \(state.describe)"] + did.map { "did: \($0)" } + (error.map { ["error: \($0)"] } ?? []) + extra
-            refs = [:]
-            listed = []
+            // The numbers of the read before stand: nothing newer was read, and the model can act on
+            // them or send the same action again (CI simulator: a type sent again after "nothing was
+            // typed" was refused as stale because the refused call's read had failed).
+            let kept = refs.isEmpty ? [] : ["the elements of the read before keep their numbers (nothing newer was read)"]
+            let lines = ["read: failed (\(notes.joined(separator: "; ")))", "runner: \(state.describe)"] + did.map { "did: \($0)" } + (error.map { ["error: \($0)"] } ?? []) + extra + kept
             return ToolResult(text: lines.joined(separator: "\n"), jpeg: nil, isError: true)
         }
         let treeRead = !reading.elements.isEmpty || reading.notes.isEmpty
@@ -210,6 +212,9 @@ final class Computer: @unchecked Sendable {
             }
             lastAll = reading.elements
             lastTreeAt = now()
+        } else if shown.isEmpty, !refs.isEmpty {
+            // A picture but no tree and no text read from it: the numbers of the read before stand.
+            notes.append("the elements of the read before keep their numbers (nothing newer was read)")
         } else {
             refs = [:]
             listed = []
@@ -501,7 +506,8 @@ final class Computer: @unchecked Sendable {
         for (i, action) in actions.enumerated() {
             let index = offset + i
             // A launch gets 9 s; a fresh one (the app ended first, up to 6 s on its own) 14 s.
-            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : action["scroll_to"] != nil ? max(config.actionCap, Self.scrollCap) : config.actionCap
+            // A type is a tap, a wait for the focus and the keys (and a wait for a busy runner): 9 s.
+            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : action["scroll_to"] != nil ? max(config.actionCap, Self.scrollCap) : action["type"] != nil ? max(config.actionCap, 9) : config.actionCap
             let actionsUntil = min(until - config.readTimeout - 0.5, now() + cap)
             let left = actionsUntil - now()
             if left < 0.3 {

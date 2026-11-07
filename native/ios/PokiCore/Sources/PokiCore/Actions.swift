@@ -312,6 +312,11 @@ extension Computer {
         if runner.busyWith != nil, await !runner.waitUntilFree(timeout: max(0.3, min(3, until - now() - 1))), let busy = runner.busyWith {
             throw ActionFailure(message: "nothing was typed: the runner is still finishing an earlier \(busy). Send the type again (with ref, so the field is tapped again) once it is through.", delivery: .notSent)
         }
+        // The keys need their time; sent with less, they may land after the action's time is up
+        // and be reported unknown (CI simulator: the text arrived, the answer said unknown).
+        guard until - now() >= 1.2 else {
+            throw ActionFailure(message: "nothing was typed: the action's time ran out while the runner was busy (\(Int(((until - now()) * 1000).rounded())) ms left, the keys need more). Send the type again.", delivery: .notSent)
+        }
         _ = try await runner.call("POST", "/wda/keys", ["value": .array(keys.map(JSON.string))], timeout: 3 + 0.06 * Double(keys.count))
         guard clear, before != nil else { return "" }
         guard let after = await fieldValue(target: target, holding: text, timeout: 1), after != text, !after.isEmpty, after != before else { return "" }
@@ -488,7 +493,7 @@ extension Computer {
         // than the read). The gesture itself is most of a swipe's time, so the action has 12 s;
         // when under 1.6 s is left the scroll stops where it is and says so, so the model calls it
         // again rather than being told that something unknown may have happened.
-        var all = lastAll, swipes = 0, last: String?
+        var all = lastAll, swipes = 0, last: String?, still = 0
         func found(_ e: Element) -> String { "\(swipes) swipes, found at \(e.frame.described)" }
         func notYet(_ why: String) -> String { "\(swipes) swipes, \(wanted) not seen yet; \(why): call scroll_to again to go on from here" }
         while hit(all) == nil, swipes < max {
@@ -497,8 +502,12 @@ extension Computer {
             // queue behind it and time out, and the whole scroll would come back unknown (seen in
             // the gym on 300 rows): the runner is waited for, and a swipe the runner did not confirm
             // ends the scroll with its progress, never with an unknown.
-            if runner.busyWith != nil, await !runner.waitUntilFree(timeout: Swift.max(0.3, Swift.min(2, until - now() - 1.6))) {
-                return notYet("the runner is still finishing the read after the last swipe")
+            var waited = false
+            if runner.busyWith != nil {
+                waited = true
+                guard await runner.waitUntilFree(timeout: Swift.max(0.3, Swift.min(2, until - now() - 1.6))) else {
+                    return notYet("the runner is still finishing the read after the last swipe")
+                }
             }
             do {
                 try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.8)
@@ -507,9 +516,18 @@ extension Computer {
             }
             swipes += 1
             await sleep(seconds: 0.1)
-            guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { continue }
+            guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { last = nil; still = 0; continue }
             let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
-            if signature == last { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
+            if signature == last, !waited {
+                // The end is declared only when two swipes in a row, each sent to a free runner and
+                // read after, left the list as it was. A swipe that went right after a wait for a
+                // busy runner may not have moved the list (the app's main loop was serving the
+                // snapshot; seen in the gym: a false end at row 180 of 300), so it does not count.
+                still += 1
+                if still >= 2 { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
+            } else {
+                still = 0
+            }
             last = signature
             all = seen.elements
         }

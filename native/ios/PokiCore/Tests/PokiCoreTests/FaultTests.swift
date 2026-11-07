@@ -429,6 +429,37 @@ final class FaultTests: XCTestCase {
         XCTAssertFalse(look.text.hasPrefix("error:"), look.text)
     }
 
+    /// The gym's 300 rows: a swipe sent right after a wait for a busy runner did not move the list
+    /// (the app's main loop was serving the snapshot), the next read matched the one before, and
+    /// scroll_to declared the end at row 180. Now the end takes two unmoved swipes in a row, each
+    /// sent to a free runner; one after a wait does not count.
+    func testScrollToDeclaresTheEndOnlyAfterTwoConfirmedUnmovedSwipes() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 20 }
+        _ = await core.call("look", [:])
+        wda.source((0..<10).map { ("Cell", "Row \($0)") })
+        let result = await core.call("do", ["actions": [["scroll_to": "Nope"]]])
+        XCTAssertTrue(result.text.contains("3 swipes, \"Nope\" not found: the list stopped moving"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/pressAndDragWithVelocity").count, 3)
+    }
+
+    /// CI simulator (ios-core run 52): a type was refused while the runner was busy, that call's
+    /// read failed, and the type sent again with the same number was refused as stale. When nothing
+    /// newer was read, the numbers of the read before stand.
+    func testTheNumbersStandWhenNothingNewerWasRead() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 0.5; $0.toolDeadline = 4 }
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("1 Button"), look.text)
+        wda.delay("GET /source", 5)
+        wda.delay("GET /screenshot", 5)
+        let failed = await core.call("look", [:])
+        XCTAssertTrue(failed.text.contains("the elements of the read before keep their numbers (nothing newer was read)"), failed.text)
+        wda.source([("Button", "General"), ("Button", "Privacy")])
+        wda.set("GET /screenshot") { _ in (200, ["value": .string(Data("png".utf8).base64EncodedString())]) }
+        let tap = await core.call("do", ["actions": [["tap": 1]]])
+        XCTAssertFalse(tap.text.contains("is not in the latest read"), tap.text)
+        XCTAssertTrue(tap.text.contains("did: tap tap \"General\" (sent,"), tap.text)
+    }
+
     /// CI simulator (ios-core run 48): a read took 4.5 s, two did not fit the action's 6 s, and the
     /// wait ran out of its time as "unknown". The read before the call, when fresh, is the first
     /// sample; a wait never runs out as unknown (it sends nothing).

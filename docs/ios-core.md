@@ -406,6 +406,18 @@ Each answer is facts only: the app in front, numbered elements, what each action
   runner still busy is waited for within the action's time (3 s at most); when it is not through
   the answer is `not_sent … nothing was typed … send the type again`, so the text is never
   typed twice and never left in doubt.
+- **A scroll declares the end only after two confirmed unmoved swipes.** `scroll_to` ends with
+  "the list stopped moving" only when two swipes in a row, each sent to a free runner and read
+  after, left the list as it was. A swipe sent right after a wait for a busy runner does not count:
+  the app's main loop may still be serving the snapshot and drop the drag (the gym's 300 rows: a
+  false end at row 180). A read that fails between swipes starts the comparison over.
+- **Typing has 9 s and never leaves the keys in doubt.** A type is a tap, a wait for the focus and
+  the keys, plus a wait for a busy runner, so it has 9 s (the action cap otherwise). When under
+  1.2 s is left for the keys they are not sent: `nothing was typed … send the type again`.
+- **The numbers stand when nothing newer was read.** A call whose read failed (no tree, no picture)
+  says "the elements of the read before keep their numbers": the model can act on them or send the
+  same action again (the CI simulator: a type sent again after "nothing was typed" was refused as
+  stale because the refused call's read had failed).
 - **A scroll that outruns its time says how far it got.** `scroll_to` has 12 s (not an action's
   6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
   blind swipe can carry the target past the screen; an element search on the runner is a full
