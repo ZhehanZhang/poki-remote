@@ -2,6 +2,20 @@
 
 What changed in each round, and what still needs the phone. Newest first.
 
+## Round 8 (2026-11-07, unattended gym round, 1:30-5:00 am ET), version 0.2.4
+
+Changed:
+- Live Activity: a tap on it never opens Poki (a no-op intent under every surface, no links); the island stays compact during steps.
+- Hand-off: the agent can hand a screen to you (passcode, password, verification, payment, other) with its own words; the Live Activity shows "Your turn" with Done; inputs pause, reads go on, the agent keeps polling. The runner's own passcode prompt after a restart uses the same card (the launcher waits up to 5 min).
+- PokiCore (dev/ios-core 9e06c49) after twelve gym runs on the simulator: a wedged app no longer blocks the runner for good (15 s watchdog, restart, "this is the new runner" note); a picture from outside the runner when the runner gives none; busy answers carry the picture and are not errors; a timed-out tree is read again in the same call (fewer children, then shallower); scroll_to reports progress and continues on the next call, never "unknown"; taps on containers name the buttons inside; no more GET /element/active (the keyboard in the tree is the focus signal); web views say to read again while their parts load.
+- App unit tests run on the simulator in CI (fake launcher: loopback drops, pairing, the agent's view of the runner, the passcode card).
+- Poki Gym (native/ios-gym, dev/ios-gym): ten hard screens and three faults scored per commit; all pass on 9e06c49.
+
+Needs the phone:
+- The hand-off card and Done on the Lock Screen and the island; a tap on the island that does not open Poki.
+- JD.com / WeChat again: tree reads under their animations, scroll_to across long feeds, the watchdog's restart if an app wedges.
+- The passcode card after a restart.
+
 ## Round 6 (2026-11-07, after the 10:32 pm ET Mail test), version 0.2.2
 
 Changed:
