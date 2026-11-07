@@ -262,8 +262,18 @@ a = await open("dense")
 let dense = await call("look at 1,500 elements", "look", budget: 15)
 check(!dense.contains("HUNG"), "a dense tree is read")
 let foundButton = await scrollTo("Found", step: "scroll_to Found", budget: 40)
-a = foundButton.contains("Found") ? foundButton : await call("look for Found", "look", budget: 15)
-a = await tap("Found", in: a, type: "Button", expect: "Found tapped")
+// 1,500 cells come before the button, past what a listing shows; scroll_to's "found at [x, y, w, h]"
+// gives its frame, and an agent taps that point.
+if let r = foundButton.range(of: #"found at \[([0-9]+), ?([0-9]+), ?([0-9]+), ?([0-9]+)\]"#, options: .regularExpression) {
+    let n = foundButton[r].split(whereSeparator: { !$0.isNumber }).compactMap { Double($0) }
+    let point: JSON = [.number(n[0] + n[2] / 2), .number(n[1] + n[3] / 2)]
+    var after = await call("tap Found at its frame", "do", ["actions": [["tap": point]]])
+    if !after.contains("Found tapped") { after = await call("look after tapping Found", "look", budget: 15) }
+    check(after.contains("Found tapped"), "tapping \"Found\" at the frame scroll_to gave shows state \"Found tapped\"")
+} else {
+    a = foundButton.contains("Found") ? foundButton : await call("look for Found", "look", budget: 15)
+    a = await tap("Found", in: a, type: "Button", expect: "Found tapped")
+}
 
 // 8. Two decoys with the button's label and frame: the real button must still be tapped.
 a = await open("dup")
