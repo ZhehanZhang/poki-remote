@@ -290,7 +290,7 @@ final class FaultTests: XCTestCase {
         // The check whether the runner is free queues behind the slow read (the fake does not queue).
         wda.delay("GET /wda/activeAppInfo", 2)
         let tap = await core.call("do", ["actions": [["tap": [100, 120]]]])
-        XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing an earlier GET /source from"), tap.text)
+        XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing an earlier GET /"), tap.text)
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 0, "nothing was queued to run late")
         XCTAssertEqual(wda.sent.filter { $0 == "POST /session" }.count, 1, "the one session stays: \(wda.sent)")
         try? await Task.sleep(nanoseconds: 2_800_000_000)
@@ -817,5 +817,45 @@ final class GymTests: XCTestCase {
         XCTAssertEqual(look.jpeg, Data("jpeg:7".utf8), look.text)
         XCTAssertTrue(look.text.contains("screenshot: taken apart from the runner"), look.text)
         XCTAssertFalse(look.isError)
+    }
+
+    /// The gym's 1,500-cell screen: the full-depth tree timed out at 4 s twice and the look answered
+    /// nothing; now the read goes on at half depth within the same call.
+    func testATimedOutTreeIsReadAgainShallowerWithinTheCall() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 14; $0.readTimeout = 1 }
+        _ = await core.call("look", [:])
+        let shallow = LockedBox(false)
+        wda.set("POST /appium/settings") { body in
+            if body?["settings"]?["snapshotMaxDepth"]?.double == 25 { shallow.value = true }
+            return (200, ["value": .null])
+        }
+        let root: JSON = ["type": "XCUIElementTypeApplication", "label": "Settings", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array([
+            ["type": "XCUIElementTypeCell", "label": "Row 1", "rect": ["x": 16, "y": 100, "width": 358, "height": 44]],
+        ])]
+        wda.set("GET /source") { _ in
+            if shallow.value { return (200, ["value": root]) }
+            try await Task.sleep(nanoseconds: 2_500_000_000)
+            return (200, ["value": root])
+        }
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("Row 1"), look.text)
+        XCTAssertTrue(look.text.contains("so it was read again to depth 25 within this call"), look.text)
+        XCTAssertFalse(look.isError)
+    }
+
+    /// A WKWebView whose page is not in the tree is listed all the same, as [collapsed], with the
+    /// picture's text inside it in every look.
+    func testAWebViewWithNothingInTheTreeIsListedWithThePicturesText() async {
+        let host = FakeHost()
+        host.texts.value = [RecognizedText(text: "A web page", box: Rect(x: 0.1, y: 0.2, width: 0.5, height: 0.04)), RecognizedText(text: "Open", box: Rect(x: 0.1, y: 0.3, width: 0.2, height: 0.04))]
+        let (core, wda, _) = makeCore(host: host)
+        wda.tree([
+            Node("NavigationBar", "Page", [0, 60, 390, 44], [Node("StaticText", "Page", [150, 70, 90, 20])]),
+            Node("WebView", nil, [0, 104, 390, 740]),
+        ], app: "Gym")
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("WebView \"web page (its parts are not in the tree)\" [0,104,390,740] [collapsed]"), look.text)
+        XCTAssertTrue(look.text.contains("\"A web page\"") && look.text.contains("\"Open\""), look.text)
+        XCTAssertTrue(look.text.contains("(read from the picture)"), look.text)
     }
 }

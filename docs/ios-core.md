@@ -358,6 +358,18 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `do` after a restart still waited on the old runner's request). A busy, hand-off or
   "another call is running" answer that says what to do next is not an error even when the runner
   gives no picture.
+- **A tree that times out is read again shallower within the same call.** A full-depth read that
+  times out (4 s) is followed, once the runner is through with it (a queued probe answered), by a
+  read at half the depth (never under 12) within the call's remaining time: `the full tree timed
+  out (…), so it was read again to depth 25 within this call; deeper parts of nested elements may
+  be missing` (seen in the gym, Nov 7 2026 3:05 am ET: a 1,500-cell screen timed out twice and the
+  look answered nothing, 8-9 s per call, while the depth-12 read after it came in 0.2 s). The next
+  read starts at that depth and a fast read doubles it back toward 50.
+- **A web view with nothing of its page in the tree is listed all the same.** WebKit's parts reach
+  the tree late or not at all under a reduced depth (seen in the gym: three looks at a WKWebView
+  listed the nav bar and nothing of the page). A WebView element is listed even with no text, as
+  `WebView "web page (its parts are not in the tree)" [collapsed]`, and the picture's text inside
+  it is listed in every look, not only `full=true`.
 - **A scroll that outruns the action's time says how far it got.** `scroll_to` needs about 2.5 s for
   a swipe and the read after it; when less is left it stops where it is: `4 swipes, "Row 250" not
   seen yet; the action's time ran out before the list was through (6 s): call scroll_to again to go

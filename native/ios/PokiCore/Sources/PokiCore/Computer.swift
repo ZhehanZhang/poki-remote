@@ -75,7 +75,7 @@ final class Computer: @unchecked Sendable {
     /// only what changed since the read before (a `do`); `full` lists every element, as the tree has it.
     func readAndReply(until: Double, full: Bool, changes: Bool = false, did: [String] = [], error: String? = nil, extra: [String] = []) async -> ToolResult {
         let budget = max(0.8, min(config.readTimeout, until - now() - 0.2))
-        let reading = await runner.read(timeout: budget, format: config.treeFormat)
+        let reading = await runner.read(timeout: budget, extra: max(0, min(5, until - now() - budget - 3)), format: config.treeFormat)
         if size == nil { _ = try? await screenSize(until: now() + 1.5) }
         let screen = size ?? ScreenSize(width: 10_000, height: 10_000)
         var notes = reading.notes
@@ -117,7 +117,9 @@ final class Computer: @unchecked Sendable {
         // What to list: the elements without repeats, and in a full read the text inside collapsed ones.
         var shown = treeRead ? lean(visible, full: full) : []
         let collapsed = Set(shown.filter { isCollapsed($0, in: reading.elements) }.map(\.node))
-        if full, !collapsed.isEmpty, let png = reading.png, size != nil {
+        // A web view with nothing of its page in the tree is read from the picture in every look.
+        let emptyWeb = shown.contains { $0.type == "WebView" && collapsed.contains($0.node) }
+        if full || emptyWeb, !collapsed.isEmpty, let png = reading.png, size != nil {
             let host = self.host
             let left = max(0.3, min(2, until - now() - 0.5))
             if let texts = (try? await withDeadline(left, "reading text from the picture", { await host.recognizeText(inPNG: png) })) ?? nil {
@@ -210,7 +212,7 @@ final class Computer: @unchecked Sendable {
         }
 
         func line(_ ref: Int, _ e: Element, _ mark: String) -> String {
-            var text = e.text
+            var text = e.text.isEmpty && e.type == "WebView" ? "web page (its parts are not in the tree)" : e.text
             if !full, text.count > Self.textLimit { text = "\(text.prefix(Self.textLimit - 10))… (+\(text.count - Self.textLimit + 10) characters)" }
             let tag = e.fromPicture ? " (read from the picture)" : collapsed.contains(e.node) ? " [collapsed]" : ""
             return "\(mark)\(ref) \(e.type) \"\(text)\" \(e.frame.described)\(tag)"
