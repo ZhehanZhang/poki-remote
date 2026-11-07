@@ -118,7 +118,33 @@ public final class Runner: @unchecked Sendable {
     /// from the top left, where a notification banner lies (seen on the phone: a Bedtime banner made
     /// a read answer SpringBoard's tree with no app). The centre of the screen belongs to the app,
     /// and to a system alert (a paste or permission prompt) when one is up, so the tree shows it.
-    static let sessionSettings: JSON = ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": 2, "activeAppDetectionPoint": "200,420"]
+    /// `snapshotMaxDepth` (WDA default 50) bounds the tree; after a read that timed out the next
+    /// read asks for half the depth (never under 12), and a fast read restores it.
+    static func sessionSettings(deadline: Double, depth: Int) -> JSON {
+        ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": .number(deadline), "activeAppDetectionPoint": "200,420", "snapshotMaxDepth": .number(Double(depth))]
+    }
+    /// WDA's settings live in its process (FBConfiguration), not in the session: set once per runner
+    /// life, by the first session, and again only to change the depth.
+    public var accessibilityDeadline: Double = 2
+    let depth = LockedBox(50)
+    let nextDepth = LockedBox(50)
+    let settingsApplied = LockedBox(false)
+
+    /// The tree depth for the next read, applied through the session's settings when it differs
+    /// from what the runner has (a queued request, bounded at 2 s).
+    func useDepth(_ wanted: Int) async {
+        let current = depth.value
+        guard wanted != current, let id = try? await session(timeout: 3) else { return }
+        if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted))]], timeout: 2, countsAsMiss: false)) != nil {
+            depth.value = wanted
+        }
+    }
+
+    /// The runner's settings are in place (a session was opened in this runner's life).
+    func ensureSettings(timeout: Double) async {
+        guard !settingsApplied.value else { return }
+        _ = try? await session(timeout: timeout)
+    }
 
     /// One request outside the session. `countsAsMiss: false` for a request that may rightly take long
     /// (a gesture): its timeout is not taken as a sign that the runner is gone.
@@ -208,6 +234,8 @@ public final class Runner: @unchecked Sendable {
     }
 
     func forgetSession() { state.update { $0.session = nil } }
+    /// The runner was restarted: its settings are the defaults again.
+    func forgetRunner() { forgetSession(); settingsApplied.value = false; depth.value = 50 }
 
     /// Whether the runner is through with the request this side gave up on: a cheap queued request
     /// (opening the session, or the active app) answered within `timeout` means the queue has
@@ -239,7 +267,9 @@ public final class Runner: @unchecked Sendable {
                     throw RunnerError(message: "the runner opened no session", delivery: .notSent)
                 }
                 // Best effort: a runner that refuses the settings still works, only slower.
-                _ = try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings], timeout: 2, countsAsMiss: false)
+                if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings(deadline: accessibilityDeadline, depth: depth.value)], timeout: 2, countsAsMiss: false)) != nil {
+                    settingsApplied.value = true
+                }
                 state.update { $0.session = id }
                 return id
             }

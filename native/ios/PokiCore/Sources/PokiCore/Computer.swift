@@ -22,6 +22,9 @@ final class Computer: @unchecked Sendable {
     let host: CoreHost
     let config: CoreConfig
     let approvals: Approvals
+    let emit: @Sendable (CoreEvent) -> Void
+    /// The step the model handed to the owner (`{handoff: {kind, text}}`), until Done is reported once.
+    let handoff = LockedBox<Handoff?>(nil)
 
     // Kept between calls; one tool call runs at a time (the gate in PokiCore), so no lock is needed.
     /// The numbers of the latest read. An element that is still there in the next read keeps its
@@ -44,7 +47,8 @@ final class Computer: @unchecked Sendable {
     static let lineLimit = 120
     static let textLimit = 160
 
-    init(runner: Runner, host: CoreHost, config: CoreConfig, approvals: Approvals) {
+    init(runner: Runner, host: CoreHost, config: CoreConfig, approvals: Approvals, emit: @escaping @Sendable (CoreEvent) -> Void = { _ in }) {
+        self.emit = emit
         self.runner = runner
         self.host = host
         self.config = config
@@ -154,7 +158,7 @@ final class Computer: @unchecked Sendable {
                         }.sorted { ($0.frame.y, $0.frame.x) < ($1.frame.y, $1.frame.x) }
                         pictureOnly = true
                     }
-                    outcome = texts == nil ? "text could not be read from the picture" : "no text found in the picture (\(ms) ms)"
+                    outcome = texts == nil ? "text could not be read from the picture; the picture is the screen now: tap points on it ([x, y]) or call look again" : "no text found in the picture (\(ms) ms); tap points on the picture ([x, y]) or call look again"
                 } catch {
                     outcome = "reading text from the picture did not finish within \(Int(((now() - began) * 1000).rounded())) ms"
                 }
@@ -244,11 +248,46 @@ final class Computer: @unchecked Sendable {
         if jpeg != nil { header.append(size != nil ? "screenshot: \(width) px wide, 1 px = 1 screen point (the same points as the frames and taps)" : "screenshot: \(width) px wide; screen size unknown") }
         header += did.map { "did: \($0)" }
         if let error { header.append("error: \(error)") }
+        if let line = handoffLine(clear: true) { header.append(line) }
         if let changedLine { header.append(changedLine) }
         header += extra
         header.append(heading)
         let footer = gone.isEmpty ? [] : ["gone since the last read: " + gone.prefix(20).map { "\($0.ref) \($0.element.type) \"\($0.element.text.prefix(40))\"" }.joined(separator: ", ")]
-        return ToolResult(text: (header + body + footer).joined(separator: "\n"), jpeg: jpeg, isError: error != nil)
+        // An answer that carries the screen is not an error, whatever happened to the actions: the
+        // `error:` line says what, and the model goes on from the picture and the elements. Only an
+        // answer with nothing read, or with nothing sent at all, is one.
+        return ToolResult(text: (header + body + footer).joined(separator: "\n"), jpeg: jpeg, isError: error != nil && did.isEmpty && jpeg == nil)
+    }
+
+    /// An answer with nothing done but the picture (served apart from WDA's queue), so a busy runner
+    /// never leaves the model blind: it sees the screen and the next look is not an error.
+    func withPicture(_ text: String, timeout: Double) async -> ToolResult {
+        guard timeout > 0.3, let png = try? await runner.screenshot(timeout: min(3, timeout)) else { return ToolResult(text: text, jpeg: nil, isError: true) }
+        lastPNG = png
+        let size = try? await screenSize(until: now() + 1)
+        let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6)
+        return ToolResult(text: text + (jpeg == nil ? "" : "\nscreenshot: the screen now (nothing was sent)"), jpeg: jpeg, isError: jpeg == nil)
+    }
+
+    /// The `handoff:` line: a step handed to the owner that is waiting, or just done (reported once).
+    func handoffLine(clear: Bool) -> String? {
+        guard let h = handoff.value else { return nil }
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        if let done = h.done {
+            if clear { handoff.value = nil }
+            return "handoff: done at \(f.string(from: done)) (\(h.kind), \(Int(done.timeIntervalSince(h.requested))) s after \"\(h.text.prefix(80))\"); inputs are sent again, go on with the task"
+        }
+        return "handoff: waiting (\(h.kind)) since \(f.string(from: h.requested)) (\(Int(Date().timeIntervalSince(h.requested))) s): \"\(h.text.prefix(80))\"; no input is sent until the owner taps Done on the phone or you send {handoff: false}; keep polling with look, or {wait_until: {handoff_done: true, ms: 10000}}"
+    }
+
+    var handoffWaiting: Bool { handoff.value.map { $0.done == nil } ?? false }
+
+    func handoffDone(id: String) {
+        let ended = handoff.update { r -> Bool in
+            guard var current = r, current.id == id, current.done == nil else { return false }
+            current.done = Date(); r = current; return true
+        }
+        if ended { emit(.handoffEnded(id: id, how: "done")) }
     }
 
     func look(full: Bool) async -> ToolResult {
@@ -279,8 +318,13 @@ final class Computer: @unchecked Sendable {
         }
         guard !state.isRunning else { return nil }
         let next: String
-        if case .failed = state { next = "Fix it on the phone, then call look again." } else { next = "Call look again in a few seconds; it is still starting." }
-        return ToolResult(text: "runner: \(state.describe)\nNothing was sent. \(next)", jpeg: nil, isError: true)
+        // A runner that is starting (the first start after a restart can wait for the owner's
+        // password or Developer Mode on the phone) is not an error: the model keeps polling look
+        // or status every few seconds and goes on when it is up; the owner is told on the phone.
+        if case .failed = state {
+            return ToolResult(text: "runner: \(state.describe)\nNothing was sent. Fix it on the phone, then call look again.", jpeg: nil, isError: true)
+        }
+        return ToolResult(text: "runner: \(state.describe)\nNothing was sent. It is still starting (the first start after a restart can wait for the owner to enter their password on the phone, which the phone asks them for); call look or status again every few seconds, and go on with the task when it answers with the screen.", jpeg: nil, isError: false)
     }
 
     // MARK: do
@@ -293,10 +337,16 @@ final class Computer: @unchecked Sendable {
         // A runner still finishing a request this side gave up on gets nothing new: what is sent now
         // would wait its turn and run late, after the model had moved on.
         if await !runner.waitUntilFree(timeout: min(config.actionCap, until - now() - config.readTimeout - 0.5)), let busy = runner.busyWith {
-            return ToolResult(text: "not_sent: the runner is still finishing an earlier \(busy); nothing was sent. Call look again in a few seconds; it answers when the runner is through.", jpeg: nil, isError: true)
+            return await withPicture("not_sent: the runner is still finishing an earlier \(busy); nothing was sent. Call look again in a few seconds; it answers when the runner is through.", timeout: until - now() - 0.5)
         }
 
         // A locked phone takes no input but the buttons; the owner unlocks it.
+        // While a step is handed to the owner, nothing is sent (they may be typing a password):
+        // the model sees the screen, waits, or takes the step back.
+        let harmless = actions.allSatisfy { $0["wait"] != nil || $0["wait_until"] != nil || $0["handoff"] != nil }
+        if !harmless, handoffWaiting, let h = handoff.value {
+            return await withPicture("not_sent: a step is handed to the owner (\(h.kind): \"\(h.text.prefix(80))\"), so no input is sent until they tap Done on the phone or you send {handoff: false}. Keep polling with look, or {wait_until: {handoff_done: true, ms: 10000}}.", timeout: until - now() - 0.5)
+        }
         let onlyButtons = actions.allSatisfy { $0["button"] != nil || $0["wait"] != nil }
         if !onlyButtons, await isLocked() {
             return ToolResult(text: "screen: locked. Nothing was sent. The owner has to unlock the phone; call look once they have.", jpeg: nil, isError: true)

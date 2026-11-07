@@ -107,7 +107,7 @@ final class ToolTests: XCTestCase {
         let (core, wda, _) = makeCore()
         _ = await core.call("look", [:])
         let result = await core.call("do", ["actions": [["tap": 9]]])
-        XCTAssertTrue(result.isError)
+        XCTAssertFalse(result.isError, "the screen was read, so the answer is not an error; its error line says what was wrong")
         XCTAssertTrue(result.text.contains("element 9 is not in the latest read"), result.text)
         XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty)
     }
