@@ -128,9 +128,9 @@ if let shot = try? await URLSession.shared.data(from: url.appendingPathComponent
 // Settings' search field: typing, read back exactly.
 let list = await call("look for the search field", "look")
 let searchRef = list.split(separator: "\n").first { $0.contains("SearchField") }.flatMap { line in line.split(separator: " ").first { Int($0.trimmingCharacters(in: CharacterSet(charactersIn: "+~"))) != nil } }.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "+~")) }
-if let searchRef, let ref = Int(searchRef) {
+if let searchRef, let fieldRef = Int(searchRef) {
     let text = "Wi-Fi 你好 123"
-    let typed = await call("type mixed text in search", "do", ["actions": [["type": .string(text), "ref": .number(Double(ref))]]])
+    let typed = await call("type mixed text in search", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldRef))]]])
     // The read-back can miss its time while the keyboard comes up; the next read shows the field then.
     // Simulator tolerance: on a fresh simulator Settings' own main loop can stop answering for a while
     // after the first search (WDA's log: "did not confirm its main run loop is responsive"), so the
