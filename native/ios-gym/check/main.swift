@@ -306,6 +306,132 @@ if let back = ref(in: a, "Gym: nav\"", type: "Button") ?? ref(in: a, "Back", typ
     check(!home.contains("Pushed page"), "the system back button pops the page")
 } else { check(false, "a back button is listed on the pushed page") }
 
+// 11. An alert that pops up in the middle of a scroll: scroll_to must answer, the alert must be
+// dismissable, and the scroll must go on afterwards.
+a = await open("interrupt")
+let interrupted = await scrollTo("Item 150", step: "scroll_to Item 150 while an alert comes up", budget: 30, max: 4)
+check(!interrupted.contains("HUNG"), "scroll_to answers while an alert comes up")
+a = await call("look for the alert", "look")
+if ref(in: a, "Not now", type: "Button") != nil {
+    a = await tap("Not now", in: a, type: "Button", expect: "Not now tapped")
+} else {
+    check(a.contains("interrupted") || a.contains("Not now tapped"), "the alert in the middle of the scroll is seen (state interrupted)")
+}
+let resumed = await scrollTo("Item 150", step: "scroll_to Item 150 after the alert", budget: 30)
+check(resumed.contains("found at") || resumed.contains("found by scroll_to"), "scroll_to finds Item 150 after the alert")
+
+// 12. The app relaunches while a wait_until runs (a crash, or a process killed under memory
+// pressure): the wait must answer, and the next read must be a tree read of the new process.
+_ = await open("animation")
+scenario = "relaunch in wait_until"
+async let waiting: String = call("wait_until a text that never comes (8 s)", "do", ["actions": [["wait_until": ["text": "Never shown", "ms": 8000]]]], budget: 15)
+try? await Task.sleep(nanoseconds: 1_500_000_000)
+print(sh(["xcrun", "simctl", "terminate", udid, gymBundle]))
+print(sh(["xcrun", "simctl", "launch", udid, gymBundle]))
+let waited = await waiting
+check(!waited.contains("HUNG"), "wait_until answers while the app relaunches under it")
+var relaunched = ""
+for i in 1...3 {
+    relaunched = await call("look after the relaunch (\(i))", "look")
+    if relaunched.contains("app: Poki Gym") && relaunched.contains("Gym: menu") { break }
+}
+check(relaunched.contains("app: Poki Gym") && relaunched.contains("Gym: menu"), "the relaunched app's tree is read (menu in front)")
+
+// System apps, as the owner's tasks use them. Each is launched fresh, and a first-run sheet with
+// Continue is dismissed as an agent would.
+@MainActor func launchApp(_ name: String, _ bundle: String) async -> String {
+    scenario = name
+    var answer = await call("launch \(name) fresh", "do", ["actions": [["launch": ["bundle": .string(bundle), "fresh": true]]]], budget: 25)
+    for i in 1...2 {
+        if let cont = ref(in: answer, "Continue", type: "Button") {
+            answer = await call("tap Continue on the first-run sheet (\(i))", "do", ["actions": [["tap": .number(Double(cont))]]])
+        } else if answer.contains("app: \(name)") { break } else {
+            answer = await call("look at \(name) (\(i))", "look")
+        }
+    }
+    check(answer.contains("app: \(name)"), "\(name) is in front after launch")
+    return answer
+}
+
+/// What the type action read back ("the field now reads \"...\"").
+func readBack(_ answer: String) -> String? {
+    guard let r = answer.range(of: #"the field now reads "([^\n]*)""#, options: .regularExpression) else { return nil }
+    return String(answer[r])
+}
+
+// 13. Settings: search with mixed Latin and CJK text, then the field cleared and searched again.
+a = await launchApp("Settings", "com.apple.Preferences")
+if ref(in: a, "Search", type: "SearchField") == nil { a = await call("look (full) for the search field", "look", ["full": true]) }
+if let field = ref(in: a, "Search", type: "SearchField") {
+    let mixed = await call("type mixed text into Search", "do", ["actions": [["type": "Wi-Fi 网络 ok", "ref": .number(Double(field))]]])
+    let shown = mixed.contains("Wi-Fi 网络 ok") ? mixed : await call("look at the search field", "look")
+    check(shown.contains("Wi-Fi"), "the Latin part of the search text is read back")
+    check(shown.contains("网络"), "the CJK part of the search text is read back (mixed text typed as keys)")
+    let cleared = await call("type General with clear", "do", ["actions": [["type": "General", "ref": .number(Double(field)), "clear": true]]])
+    let after = readBack(cleared) ?? ""
+    check(after.contains("General") && !after.contains("Wi-Fi"), "clear removes the earlier search text before the new one (read back: \(after.prefix(60)))")
+    var cancelIn = cleared
+    if ref(in: cancelIn, "Cancel", type: "Button") == nil { cancelIn = await call("look for Cancel", "look") }
+    if let cancel = ref(in: cancelIn, "Cancel", type: "Button") {
+        _ = await call("tap Cancel", "do", ["actions": [["tap": .number(Double(cancel))]]])
+    }
+} else { check(false, "the Settings search field is listed") }
+
+// 14. Notes: a new note, typing, a clear and a second type.
+a = await launchApp("Notes", "com.apple.mobilenotes")
+if ref(in: a, "New Note") == nil && ref(in: a, "New note") == nil { a = await call("look (full) for New Note", "look", ["full": true]) }
+if let compose = ref(in: a, "New Note", type: "Button") ?? ref(in: a, "New note", type: "Button") ?? ref(in: a, "Compose", type: "Button") {
+    a = await call("tap New Note", "do", ["actions": [["tap": .number(Double(compose))]]])
+    let typed = await call("type the first line (no ref: the note has focus)", "do", ["actions": [["wait_until": ["settled": true, "ms": 1500]], ["type": "First line of the note"]]])
+    let first = typed.contains("First line of the note") ? typed : await call("look at the note", "look")
+    check(first.contains("First line of the note"), "typing without a ref lands in the new note")
+    if let body = ref(in: first, "First line of the note") ?? ref(in: first, "First line of the note", type: "TextView") {
+        let replaced = await call("type a second text with clear", "do", ["actions": [["type": "Second text", "ref": .number(Double(body)), "clear": true]]])
+        var rb = readBack(replaced) ?? ""
+        if rb.isEmpty { rb = await call("look at the note after clear", "look") }
+        check(rb.contains("Second text") && !rb.contains("First line"), "clear empties the note before the second text (read back: \(rb.prefix(60)))")
+        let more = await call("type more without clear", "do", ["actions": [["type": " and more", "ref": .number(Double(body))]]])
+        var rb2 = readBack(more) ?? ""
+        if rb2.isEmpty { rb2 = await call("look at the note after the second type", "look") }
+        check(rb2.contains("Second text and more"), "a second type appends to the note (read back: \(rb2.prefix(60)))")
+    } else { check(false, "the note's text is listed as an element") }
+    let doneIn = await call("look for Done", "look")
+    if let done = ref(in: doneIn, "Done", type: "Button") { _ = await call("tap Done", "do", ["actions": [["tap": .number(Double(done))]]]) }
+} else { check(false, "the New Note button is listed") }
+
+// 15. Safari: a page with links, scroll_to on page text, a link tapped.
+a = await launchApp("Safari", "com.apple.mobilesafari")
+if ref(in: a, "Address") == nil { a = await call("look (full) for the address bar", "look", ["full": true]) }
+if let address = ref(in: a, "Address") {
+    let opened = await call("type a URL and return", "do", ["actions": [["type": "example.com", "ref": .number(Double(address))], ["key": "return"], ["wait_until": ["text": "Example Domain", "ms": 12000]]]], budget: 25)
+    let loaded = opened.contains("Example Domain") ? opened : await call("look at the page", "look")
+    if loaded.contains("Example Domain") {
+        check(true, "the page loads and its text is in the tree")
+        let link = await scrollTo("More information", step: "scroll_to the link's text", budget: 30, max: 3)
+        check(link.contains("found at") || link.contains("found by scroll_to") || ref(in: link, "More information") != nil, "scroll_to finds page text in Safari")
+        var page = link
+        if ref(in: page, "More information") == nil { page = await call("look (full) for the link", "look", ["full": true]) }
+        if let l = ref(in: page, "More information", type: "Link") ?? ref(in: page, "More information") {
+            let followed = await call("tap the link and wait for the next page", "do", ["actions": [["tap": .number(Double(l))], ["wait_until": ["text": "Reserved Domains", "ms": 12000]]]], budget: 25)
+            let next = followed.contains("Reserved Domains") ? followed : await call("look at the next page", "look")
+            check(next.contains("Reserved Domains") || next.contains("screen_changed: true"), "tapping a link in Safari opens the next page")
+            let back = await call("back", "do", ["actions": [["back": true], ["wait_until": ["text": "Example Domain", "ms": 8000]]]], budget: 20)
+            check(back.contains("Example Domain") || back.contains("did: back"), "back returns to the first page")
+        } else { check(false, "the link is listed in the tree") }
+    } else { check(false, "the page loads (example.com over the runner's network)") }
+} else { check(false, "the Safari address bar is listed") }
+
+// 16. Photos: a grid cell tapped, then back to the grid.
+a = await launchApp("Photos", "com.apple.mobileslideshow")
+if ref(in: a, "Photo", type: "Image") == nil { a = await call("look (full) for a photo", "look", ["full": true]) }
+if let cell = ref(in: a, "Photo", type: "Image") ?? ref(in: a, "Photo") {
+    let openedPhoto = await call("tap a photo", "do", ["actions": [["tap": .number(Double(cell))], ["wait_until": ["settled": true, "ms": 2000]]]])
+    check(openedPhoto.contains("screen_changed: true"), "tapping a grid cell opens the photo (screen changed)")
+    let backToGrid = await call("back to the grid", "do", ["actions": [["back": true], ["wait_until": ["settled": true, "ms": 2000]]]])
+    let grid = ref(in: backToGrid, "Photo", type: "Image") != nil ? backToGrid : await call("look (full) at the grid", "look", ["full": true])
+    check(ref(in: grid, "Photo", type: "Image") != nil, "back returns to the photo grid")
+} else { check(false, "a photo cell is listed in the grid") }
+
 // Faults. A. A look while the runner is busy with a long action: it must answer, not queue forever.
 scenario = "busy runner"
 _ = await open("animation")

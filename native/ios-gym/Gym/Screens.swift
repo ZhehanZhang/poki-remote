@@ -71,6 +71,25 @@ struct ListScreen: View {
     }
 }
 
+/// A list that gets an alert on top of it while the agent is scrolling (a promotion or a permission
+/// prompt in the middle of a feed): scroll_to must notice and answer, and the alert must be dismissable.
+struct InterruptScreen: View {
+    @EnvironmentObject var state: GymState
+    @State private var showing = false
+    var body: some View {
+        List(1...300, id: \.self) { n in
+            Button("Item \(n)") { state.set("Item \(n) tapped") }.accessibilityIdentifier("item-\(n)")
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            showing = true; state.set("interrupted")
+        }
+        .alert("Just a moment", isPresented: $showing) {
+            Button("Not now") { state.set("Not now tapped") }
+        } message: { Text("An alert in the middle of a scroll.") }
+    }
+}
+
 struct SheetScreen: View {
     @EnvironmentObject var state: GymState
     @State private var open = false

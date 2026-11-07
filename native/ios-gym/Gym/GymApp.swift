@@ -24,7 +24,7 @@ struct GymApp: App {
 }
 
 enum Scenario: String, CaseIterable, Identifiable {
-    case animation, alert, paste, list, sheet, focus, dense, dup, fullscreen, nav
+    case animation, alert, paste, list, sheet, focus, dense, dup, fullscreen, nav, interrupt
     var id: String { rawValue }
     var blurb: String {
         switch self {
@@ -38,6 +38,7 @@ enum Scenario: String, CaseIterable, Identifiable {
         case .dup: "Two elements with one label and frame over a Twin button"
         case .fullscreen: "A web view filling the screen with one link"
         case .nav: "Push a page with a system back button"
+        case .interrupt: "300 rows; an alert pops up 2 s after the screen opens"
         }
     }
 }
@@ -82,6 +83,7 @@ struct ScenarioScreen: View {
                 case .dup: DupScreen()
                 case .fullscreen: FullscreenScreen()
                 case .nav: NavScreen()
+                case .interrupt: InterruptScreen()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

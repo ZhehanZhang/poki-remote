@@ -48,7 +48,7 @@ jobs:
           mkdir -p shots
           PID=$(xcrun simctl launch "$UDID" nz.zheha.poki.gym | sed -E 's/.*: *//')
           echo "Poki Gym pid $PID"
-          for s in menu animation alert paste list sheet focus dense dup fullscreen nav; do
+          for s in menu animation alert paste list sheet focus dense dup fullscreen nav interrupt; do
             [ "$s" = menu ] || xcrun simctl openurl "$UDID" "pokigym://$s"
             sleep 2
             xcrun simctl io "$UDID" screenshot "shots/$s.png" > /dev/null

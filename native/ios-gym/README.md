@@ -17,6 +17,7 @@ Open a scenario with `xcrun simctl openurl <udid> pokigym://<scenario>`, or from
 | dup | Two elements labelled Twin with the same frame over the real Twin button |
 | fullscreen | A WKWebView filling the screen with one link, Open, that sets its title to Opened |
 | nav | Push opens a page with the system back button; back sets "state: popped" |
+| interrupt | 300 rows, and an alert ("Just a moment", Not now) 2 s after the screen opens, in the middle of a scroll |
 
 Every screen shows "Gym: <scenario>" at the top and "state: <last event>" at the bottom, so an agent
 can tell where it is and what its last action did from the tree alone.
