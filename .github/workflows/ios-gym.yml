@@ -42,12 +42,13 @@ jobs:
           xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" "$APP"
           mkdir -p shots
+          PID=$(xcrun simctl launch "$UDID" nz.zheha.poki.gym | sed -E 's/.*: *//')
+          echo "Poki Gym pid $PID"
           for s in menu animation alert paste list sheet focus dense dup fullscreen nav; do
-            if [ "$s" = menu ]; then xcrun simctl launch "$UDID" nz.zheha.poki.gym > /dev/null
-            else xcrun simctl openurl "$UDID" "pokigym://$s"; fi
+            [ "$s" = menu ] || xcrun simctl openurl "$UDID" "pokigym://$s"
             sleep 2
             xcrun simctl io "$UDID" screenshot "shots/$s.png" > /dev/null
-            xcrun simctl spawn "$UDID" launchctl list | grep -q 'nz.zheha.poki.gym' || { echo "::error::Poki Gym died on $s"; exit 1; }
+            kill -0 "$PID" 2>/dev/null || { echo "::error::Poki Gym died on $s"; ls ~/Library/Logs/DiagnosticReports/ | tail -3; exit 1; }
           done
           ls shots
       - uses: actions/upload-artifact@v4
