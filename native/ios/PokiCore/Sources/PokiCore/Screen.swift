@@ -291,7 +291,8 @@ extension Runner {
             // taken beside the first try did not: the runner gives it now (seen in the gym). Else
             // the host's own path, apart from the runner, with up to 6 s of its own (simctl on a CI
             // simulator took over 2 s).
-            if treeCame, let again = try? await screenshot(timeout: max(0.5, min(1.5, started + timeout + extra - now()))) {
+            let readLeft = started + timeout + extra - now()
+            if treeCame, readLeft > 0.4, let again = try? await screenshot(timeout: min(1.5, readLeft)) {
                 reading.png = again
                 reading.notes.append("the screenshot came on the second try (the first: \(e))")
             } else if let fallback = screenshotFallback {
