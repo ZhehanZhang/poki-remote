@@ -160,7 +160,7 @@ extension Computer {
             if via == "pasted" {
                 note = try await paste(text, clear: clear, until: until, target: target)
             } else {
-                note = try await type(text, clear: clear, hidden: hidden, target: target)
+                note = try await type(text, clear: clear, hidden: hidden, target: target, until: until)
             }
             // What the field holds now, so the model sees at once whether the text arrived whole.
             let reads = await fieldValue(target: target, holding: text, timeout: min(1.5, max(0.3, until - now() - 0.2)))
@@ -295,7 +295,7 @@ extension Computer {
     /// cleared through WDA's element clear once (bounded at 3 s) and the text typed again; the
     /// answer says what happened. Returns a note for the answer.
     @discardableResult
-    func type(_ text: String, clear: Bool, hidden: Bool = false, target: Element? = nil) async throws -> String {
+    func type(_ text: String, clear: Bool, hidden: Bool = false, target: Element? = nil, until: Double = .infinity) async throws -> String {
         var deletes = 0
         var before: String?
         if clear {
@@ -304,6 +304,14 @@ extension Computer {
         }
         let keys = Array(repeating: "\u{8}", count: deletes) + text.map(String.init)
         guard keys.count <= 2000 else { throw ActionFailure(message: "at most 2000 characters at a time", delivery: .notSent) }
+        // The keys queue behind whatever the runner is still serving: the focus reads this side gave
+        // up on while the keyboard came up (the CI simulator's runner stood still for seconds at the
+        // keyboard's first use, and the keys sent behind those reads were "unknown"). A busy runner
+        // is waited for within the action's time; when it is not through, nothing is typed, so the
+        // text can be sent again safely.
+        if runner.busyWith != nil, await !runner.waitUntilFree(timeout: max(0.3, min(3, until - now() - 1))), let busy = runner.busyWith {
+            throw ActionFailure(message: "nothing was typed: the runner is still finishing an earlier \(busy). Send the type again (with ref, so the field is tapped again) once it is through.", delivery: .notSent)
+        }
         _ = try await runner.call("POST", "/wda/keys", ["value": .array(keys.map(JSON.string))], timeout: 3 + 0.06 * Double(keys.count))
         guard clear, before != nil else { return "" }
         guard let after = await fieldValue(target: target, holding: text, timeout: 1), after != text, !after.isEmpty, after != before else { return "" }

@@ -29,10 +29,17 @@ final class ChaosRunner: HTTPTransport, @unchecked Sendable {
 
     var tally: [String: Int] { counts.value }
     private func count(_ kind: String) { counts.update { $0[kind, default: 0] += 1 } }
+    /// Every request with what was done to it and when (for the print when a call runs late).
+    let trace = LockedBox<[String]>([])
+    private let began = Date()
 
     func send(method: String, url: URL, body: Data?, timeout: Double) async throws -> (status: Int, body: Data) {
         if calm.value { return try await base.send(method: method, url: url, body: body, timeout: timeout) }
         let roll = next()
+        let kind = roll < 0.05 ? "hang" : roll < 0.10 ? "refused" : roll < 0.13 ? "lost session" : roll < 0.18 ? "error 500" : roll < 0.30 ? "slow" : "normal"
+        let at = Date().timeIntervalSince(began)
+        trace.update { $0.append(String(format: "%8.2f %@ %@ %@ (timeout %.1f)", at, method, url.path, kind, timeout)) }
+        defer { trace.update { $0.append(String(format: "%8.2f   done %@ %@ after %.2f s", Date().timeIntervalSince(began), method, url.path, Date().timeIntervalSince(began) - at)) } }
         switch roll {
         case ..<0.05:
             count("hang")
@@ -129,7 +136,11 @@ final class SoakTests: XCTestCase {
             // Every step has its own deadline, so the outer backstop ("did not finish … what was sent
             // is unknown") must never be what answers: the agent always gets facts.
             XCTAssertFalse(result.text.contains("did not finish within") && result.text.hasPrefix("error:"), "call \(i) \(name) \(args.serialized()) hit the backstop after \(String(format: "%.2f", took)) s: \(result.text.prefix(200))")
-            if took > config.toolDeadline + 0.5 { print("soak: call \(i) \(name) \(args.serialized()) took \(String(format: "%.2f", took)) s: \(result.text.prefix(300))") }
+            if took > config.toolDeadline + 0.5 {
+                print("soak: call \(i) \(name) \(args.serialized()) took \(String(format: "%.2f", took)) s: \(result.text.prefix(300))")
+                print("soak: requests during call \(i):\n" + chaos.trace.value.suffix(40).joined(separator: "\n"))
+            }
+            chaos.trace.value = []
             if result.isError { errors += 1 }
             let first = result.text.split(separator: "\n").first.map(String.init) ?? ""
             let kind = first.hasPrefix("app:") ? "read" : String(first.prefix(24))

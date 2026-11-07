@@ -388,9 +388,12 @@ final class Computer: @unchecked Sendable {
         }
 
         // The runner's start and the checks above are not the actions' time (seen on the phone: a
-        // launch sent while the runner was starting had its 9 s used up before it went).
+        // launch sent while the runner was starting had its 9 s used up before it went). The call's
+        // backstop allows `runnerWait` for that, so the shift stops there: a runner that was waited
+        // for and then busy for the action cap on top (the soak, call 111) must not push the
+        // actions past the backstop, which answers with nothing.
         let prepared = now()
-        until += prepared - started
+        until += min(prepared - started, config.runnerWait)
         started = prepared
         let before = lastForeground
         var extra: [String] = []

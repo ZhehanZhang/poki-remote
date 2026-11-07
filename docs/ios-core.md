@@ -297,7 +297,9 @@ Each answer is facts only: the app in front, numbered elements, what each action
   starts; a launch 9 s), and the whole tool call has `toolDeadline` (25 s, the actions and the read
   together). The action time starts when the actions do, after the runner's start and the lock
   check (seen on the phone: a launch sent while the runner was starting had its time used up
-  before it went, and a batch of Home, tap and drag had 6 s for all three).
+  before it went, and a batch of Home, tap and drag had 6 s for all three), by at most
+  `runnerWait` (15 s): the call's backstop allows that much for the start, and a call pushed past
+  the backstop answers with nothing (the soak test caught one at 6.3 s against a 4 s deadline).
 - At the deadline the tool answers anyway, saying which step did not finish and whether it may
   have been delivered, plus the last good read if any. A late runner answer is dropped.
 - Two refused or broken runner requests in a row mark the runner unhealthy: PokiCore calls
@@ -386,6 +388,13 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
   the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
   parts arrive 3-4 s after the page loads).
+- **Typing waits for a busy runner, and sends nothing when it is not through.** The keys queue
+  behind whatever the runner is still serving (the focus reads this side gave up on while the
+  keyboard came up: on the CI simulator the runner stood still for seconds at the keyboard's first
+  use, and the keys sent behind those reads came back unknown, typed or not). Before the keys go, a
+  runner still busy is waited for within the action's time (3 s at most); when it is not through
+  the answer is `not_sent … nothing was typed … send the type again`, so the text is never
+  typed twice and never left in doubt.
 - **A scroll that outruns its time says how far it got.** `scroll_to` has 12 s (not an action's
   6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
   blind swipe can carry the target past the screen; an element search on the runner is a full
