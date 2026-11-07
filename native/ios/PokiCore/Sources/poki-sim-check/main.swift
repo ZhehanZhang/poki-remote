@@ -29,8 +29,9 @@ final class Host: CoreHost, @unchecked Sendable {
 
 let url = URL(string: ProcessInfo.processInfo.environment["POKI_WDA_URL"] ?? "http://127.0.0.1:8100")!
 let treeFormat = ProcessInfo.processInfo.environment["POKI_TREE_FORMAT"] ?? "xml"
-let core = PokiCore(config: CoreConfig(runnerURL: url, treeFormat: treeFormat), host: Host())
-print("tree format: \(treeFormat)")
+let axDeadline = Double(ProcessInfo.processInfo.environment["POKI_AX_DEADLINE"] ?? "") ?? 2
+let core = PokiCore(config: CoreConfig(runnerURL: url, treeFormat: treeFormat, accessibilityDeadline: axDeadline), host: Host())
+print("tree format: \(treeFormat), accessibilityDeadline: \(axDeadline)")
 var session: String?
 var rows: [(String, Int, String)] = []
 var failures: [String] = []
@@ -42,12 +43,19 @@ var failures: [String] = []
     return try? JSON.parse(reply.body)
 }
 
+var errorAnswers: [String] = []
+var pictureless: [String] = []
+
 @discardableResult @MainActor
 func call(_ label: String, _ name: String, _ args: JSON = .object([:])) async -> String {
     let started = Date()
     let reply = await rpc("tools/call", ["name": .string(name), "arguments": args])
     let ms = Int(Date().timeIntervalSince(started) * 1000)
     let text = reply?["result"]?["content"]?[0]?["text"]?.string ?? "no answer: \(reply?.serialized() ?? "nil")"
+    // The owner's rule: with the runner up, no answer halts the model (isError) and every look/do
+    // carries the picture.
+    if reply?["result"]?["isError"]?.bool == true { errorAnswers.append(label) }
+    if name != "status", !(reply?["result"]?["content"]?.array ?? []).contains(where: { $0["type"]?.string == "image" }) { pictureless.append(label) }
     let pictures = reply?["result"]?["content"]?.array?.filter { $0["type"]?.string == "image" } ?? []
     let images = pictures.count
     // Every picture the model would have seen, numbered by step, for reading a failure afterwards.
@@ -71,6 +79,17 @@ func call(_ label: String, _ name: String, _ args: JSON = .object([:])) async ->
 }
 
 _ = await rpc("initialize", ["protocolVersion": "2025-06-18", "capabilities": .object([:]), "clientInfo": ["name": "poki-sim-check", "version": "1"]])
+
+/// The number of the first listed element whose line holds `text`, from a look/do answer.
+func ref(in answer: String, _ text: String) -> Int? {
+    for line in answer.split(separator: "\n") where line.contains(text) {
+        let head = line.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "+~ "))
+        if let n = Int(head.prefix { $0.isNumber }), !head.prefix { $0.isNumber }.isEmpty { return n }
+    }
+    return nil
+}
+
+
 await call("look (cold: opens the session)", "look")
 let launched = await call("launch Settings fresh", "do", ["actions": [["launch": ["bundle": "com.apple.Preferences", "fresh": true]]]])
 // A cold app's first tree can take longer than a read waits on a CI simulator; the reply then says
@@ -129,6 +148,8 @@ if let searchRef, let ref = Int(searchRef) {
 let home = await call("home", "do", ["actions": [["button": "home"]]])
 check(home.contains("(sent,"), "home is pressed")
 await call("status", "status")
+check(errorAnswers.isEmpty, "no answer was an error while the runner was up (\(errorAnswers.joined(separator: ", ")))")
+check(pictureless.isEmpty, "every look/do carried the picture (\(pictureless.joined(separator: ", ")))")
 
 print("\n| call | ms | first line |\n|---|---:|---|")
 for (label, ms, line) in rows { print("| \(label) | \(ms) | \(line.replacingOccurrences(of: "|", with: "/")) |") }

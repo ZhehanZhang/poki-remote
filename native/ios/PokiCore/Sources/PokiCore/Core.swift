@@ -22,11 +22,15 @@ public struct CoreConfig: Sendable {
     /// read of Settings took 0.2 to 0.4 s against 0.6 to 0.7 s, and 0.3 s against 2.0 s with the
     /// keyboard up.
     public var treeFormat: String
+    /// WDA's `accessibilityDeadline`: how long the app's main loop may take to answer before a tree
+    /// read is refused (0 turns the check off). 2 s on the phone; the gym compares both.
+    public var accessibilityDeadline: Double
     /// Poki's own bundle id: a tap that lands on its Live Activity (the Dynamic Island) brings it to the
     /// front; `do` brings the app it was working in back and says so, rather than act inside Poki.
     public var ownBundleID: String
 
-    public init(relayURL: URL = URL(string: "wss://pokimcp.zheha.nz/v1")!, runnerURL: URL = URL(string: "http://127.0.0.1:8100")!, sensitive: SensitivityRules = SensitivityRules(), approvalWait: Double = 20, toolDeadline: Double = 25, actionCap: Double = 6, readTimeout: Double = 4, busyWait: Double = 2, runnerWait: Double = 15, treeFormat: String = "xml", ownBundleID: String = "nz.zheha.poki") {
+    public init(relayURL: URL = URL(string: "wss://pokimcp.zheha.nz/v1")!, runnerURL: URL = URL(string: "http://127.0.0.1:8100")!, sensitive: SensitivityRules = SensitivityRules(), approvalWait: Double = 20, toolDeadline: Double = 25, actionCap: Double = 6, readTimeout: Double = 4, busyWait: Double = 2, runnerWait: Double = 15, treeFormat: String = "xml", ownBundleID: String = "nz.zheha.poki", accessibilityDeadline: Double = 2) {
+        self.accessibilityDeadline = accessibilityDeadline
         self.relayURL = relayURL
         self.runnerURL = runnerURL
         self.sensitive = sensitive
@@ -108,6 +112,31 @@ public enum CoreEvent: Sendable, Equatable {
     case toolFinished(ToolActivity, ToolOutcome, ToolFacts)
     case approvalRequested(Approval)
     case approvalEnded(id: String, approved: Bool?)
+    /// The model handed a step to the owner (`{handoff: {kind, text}}`: a passcode, a password, a
+    /// verification, a payment it will not make). `kind` is one of passcode, password, verification,
+    /// payment, other (the app adds runnerPasscode itself). The Live Activity shows it with a Done
+    /// button; no input is sent until `handoffDone(id:)` (Done) or the model takes it back
+    /// (`{handoff: false}`), while every look is served and the model keeps polling.
+    case handoffRequested(id: String, kind: String, text: String?, app: String?)
+    /// `how` is "done" (the owner tapped Done) or "takenBack" (the model sent `{handoff: false}`).
+    case handoffEnded(id: String, how: String)
+}
+
+/// A step handed to the owner by the model, shown in the Live Activity until the owner taps Done
+/// or the model takes it back.
+public struct Handoff: Sendable, Equatable {
+    public var id: String
+    public var kind: String
+    public var text: String
+    public var requested: Date
+    public var done: Date?
+    public init(id: String, kind: String, text: String, requested: Date, done: Date? = nil) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.requested = requested
+        self.done = done
+    }
 }
 
 public struct RelayRequest: Sendable {
@@ -150,12 +179,13 @@ public final class PokiCore: @unchecked Sendable {
         events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { c = $0 }
         continuation = c
         runner = Runner(url: config.runnerURL, transport: transport)
+        runner.accessibilityDeadline = config.accessibilityDeadline
         let emit: @Sendable (CoreEvent) -> Void = { [c] event in c!.yield(event) }
         approvals = Approvals(emit: emit)
-        computer = Computer(runner: runner, host: host, config: config, approvals: approvals)
+        computer = Computer(runner: runner, host: host, config: config, approvals: approvals, emit: emit)
         // Two silent runner requests in a row: the runner is gone or stuck, so the launcher starts it again.
         runner.onUnhealthy = { [weak host, runner] in
-            runner.forgetSession()
+            runner.forgetRunner()
             host?.restartRunner()
         }
     }
@@ -191,6 +221,11 @@ public final class PokiCore: @unchecked Sendable {
     public func accessChanged() { relay?.sendAccess() }
 
     public func resolveApproval(id: String, approved: Bool) { approvals.resolve(id: id, approved: approved) }
+
+    /// The owner tapped Done on a step the model handed to them (the Live Activity).
+    public func handoffDone(id: String) { computer.handoffDone(id: id) }
+    /// The step the model handed to the owner that is still waiting, if any.
+    public var handoff: Handoff? { computer.handoff.value.flatMap { $0.done == nil ? $0 : nil } }
 
     public var pendingApproval: Approval? { approvals.pending }
 
@@ -265,13 +300,13 @@ public final class PokiCore: @unchecked Sendable {
 
     // MARK: Tools
 
-    static let instructions = "look reads the iPhone's screen; do runs actions and then reads it. Both return the app in front, numbered elements and a screenshot whose pixels are screen points. Use the numbers from the latest answer; an element that stays on screen keeps its number, and do lists only what changed. Decide what happened from the elements, the screen_changed line and the picture. To reach something further down a list, use scroll_to with its text before trying swipes. Some actions (payments, deleting, sending messages, passwords) need the owner's approval on the phone; do says so instead of sending them."
+    static let instructions = "look reads the iPhone's screen; do runs actions and then reads it. Both return the app in front, numbered elements and a screenshot whose pixels are screen points. Use the numbers from the latest answer; an element that stays on screen keeps its number, and do lists only what changed. Decide what happened from the elements, the screen_changed line and the picture. To reach something further down a list, use scroll_to with its text before trying swipes. Some actions (payments, deleting, sending messages, passwords) need the owner's approval on the phone; do says so instead of sending them. When the tree is late the elements come from the picture and a tap on a point of the picture always works: there is always a way on. A step that is the owner's to do (a password, a verification, a checkout you will not make) is handed to them with {handoff: {kind, text}}; keep polling look while they do it, then go on."
 
     static let tools: [JSON] = [
         ["name": "look", "description": "Read the screen now: the app in front, the numbered elements (role, \"label = value\", [x,y,w,h] in screen points; + marks elements new since the last read, ~ moved ones) and a screenshot that is one pixel per screen point, so a point on the picture is a point to tap. Repeated text, scroll bars and empty containers are left out and long labels are cut; full=true lists every element as the tree has it and adds the text read from the picture inside [collapsed] elements (an app showed a whole cell, buttons and all, as one element). Numbers stay the same while an element stays on screen.",
          "inputSchema": ["type": "object", "properties": ["full": ["type": "boolean"]], "additionalProperties": false],
          "annotations": ["readOnlyHint": true]],
-        ["name": "do", "description": "Run actions in order, then read the screen once. The answer says what each action did, screen_changed (true or false: whether the elements or the picture differ from the read before), and only the elements that are new (+) or moved (~); the others keep their numbers (full=true lists all). Actions: {tap: n} or {tap: [x, y]} (a numbered element is tapped at its centre, or at the nearest free point when the tree puts something over its centre, and the answer says so; only an element with no part on the screen is refused as not_hittable); {type: \"text\", ref?: n, clear?: true, via?: \"paste\"} (taps n first, then types the text as key presses and says what the field holds afterwards; via paste is the backup when typing comes out wrong: it pastes through the field's menu and puts the owner's clipboard back); {key: \"return\"|\"delete\"|\"tab\"|\"space\"|\"escape\"}; {scroll_to: \"text\"} or {scroll_to: {text or ref, in?: n, direction?: \"down\", max_swipes?: 6}} (the best way to bring something into view: it scrolls until the text is fully on screen and says where); {swipe: \"up\"|\"down\"|\"left\"|\"right\"} or {swipe: {direction, in?: n, distance?: \"short\"|\"long\"}} (a quick flick inside the biggest list on screen, or inside n, clear of bars; direction is where the finger moves, so up shows what is further down); {drag: {from: n or [x, y], to: n or [x, y], ms?: 400, hold_ms?: 0}} or {drag: [x1, y1, x2, y2]} (the content follows the finger and stops where it stops; hold_ms first to pick something up); {long_press: n or [x, y] or {ref, ms?}}; {pinch: {ref or x, y, scale}}; {button: \"home\"|\"lock\"|\"volume_up\"|\"volume_down\"}; {launch: \"bundle id\"} or {launch: {bundle, fresh: true}}; {wait_until: \"text\"} or {wait_until: {text, gone?: true, ms?: 3000}} or {wait_until: {settled: true, ms?}} (reads the screen until the text appears or goes, or the screen holds still; use it instead of fixed waits); {wait: ms}. Points are screen points, like the frames and the screenshot's pixels. A locked phone takes nothing but buttons and says screen: locked. Each action is reported as sent, not_sent or unknown; it stops at the first action that fails and never re-sends one that may have been delivered. Payments, deleting, sending messages and passwords need the owner's approval on the phone: the plain actions before the first such action are sent, the rest are not, and the answer says approval_required and which actions to send again, on their own, after they approve. A runner still finishing an earlier request answers not_sent and busy; call look again then.",
+        ["name": "do", "description": "Run actions in order, then read the screen once. The answer says what each action did, screen_changed (true or false: whether the elements or the picture differ from the read before), and only the elements that are new (+) or moved (~); the others keep their numbers (full=true lists all). Actions: {tap: n} or {tap: [x, y]} (a numbered element is tapped at its centre, or at the nearest free point when the tree puts something over its centre, and the answer says so; only an element with no part on the screen is refused as not_hittable); {type: \"text\", ref?: n, clear?: true, via?: \"paste\"} (taps n first, then types the text as key presses and says what the field holds afterwards; via paste is the backup when typing comes out wrong: it pastes through the field's menu and puts the owner's clipboard back); {key: \"return\"|\"delete\"|\"tab\"|\"space\"|\"escape\"}; {scroll_to: \"text\"} or {scroll_to: {text or ref, in?: n, direction?: \"down\", max_swipes?: 6}} (the best way to bring something into view: it scrolls until the text is fully on screen and says where); {swipe: \"up\"|\"down\"|\"left\"|\"right\"} or {swipe: {direction, in?: n, distance?: \"short\"|\"long\"}} (a quick flick inside the biggest list on screen, or inside n, clear of bars; direction is where the finger moves, so up shows what is further down); {drag: {from: n or [x, y], to: n or [x, y], ms?: 400, hold_ms?: 0}} or {drag: [x1, y1, x2, y2]} (the content follows the finger and stops where it stops; hold_ms first to pick something up); {long_press: n or [x, y] or {ref, ms?}}; {pinch: {ref or x, y, scale}}; {button: \"home\"|\"lock\"|\"volume_up\"|\"volume_down\"}; {launch: \"bundle id\"} or {launch: {bundle, fresh: true}}; {wait_until: \"text\"} or {wait_until: {text, gone?: true, ms?: 3000}} or {wait_until: {settled: true, ms?}} (reads the screen until the text appears or goes, or the screen holds still; use it instead of fixed waits); {wait: ms}; {back: true} (the top-left back button if one is listed, else an edge swipe from the left); {handoff: {kind: \"passcode\"|\"password\"|\"verification\"|\"payment\"|\"other\", text: \"what the owner must do\"}} (when a step is the owner's to do, by your own judgement: it is shown on the phone with a Done button, no input is sent until they tap Done or you send {handoff: false}, and you keep polling with look or {wait_until: {handoff_done: true, ms?: 10000}} rather than ending your work). Points are screen points, like the frames and the screenshot's pixels. A locked phone takes nothing but buttons and says screen: locked. Each action is reported as sent, not_sent or unknown; it stops at the first action that fails and never re-sends one that may have been delivered. Payments, deleting, sending messages and passwords need the owner's approval on the phone: the plain actions before the first such action are sent, the rest are not, and the answer says approval_required and which actions to send again, on their own, after they approve. A runner still finishing an earlier request answers not_sent and busy; call look again then.",
          "inputSchema": ["type": "object", "properties": ["actions": ["type": "array", "items": ["type": "object"], "minItems": 0, "maxItems": 20], "full": ["type": "boolean"]], "required": ["actions"], "additionalProperties": false]],
         ["name": "status", "description": "Poki's state without touching the phone: the runner, the relay, and any approval waiting on the phone.",
          "inputSchema": ["type": "object", "properties": .object([:]), "additionalProperties": false],
@@ -316,6 +351,7 @@ public final class PokiCore: @unchecked Sendable {
         var lines = ["runner: \(host?.runnerState().describe ?? "unknown")"]
         if let relay { lines.append("relay: \(relay.stateDescription)") }
         if let p = approvals.pending { lines.append("approval waiting on the phone: \(p.summary) (\(p.reason), id \(p.id))") }
+        if let line = computer.handoffLine(clear: false) { lines.append(line) }
         if let current = gate.current { lines.append("running: \(current)") }
         return ToolResult(text: lines.joined(separator: "\n"), jpeg: nil)
     }

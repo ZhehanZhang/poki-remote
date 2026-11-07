@@ -8,7 +8,8 @@ import Foundation
 //   {scroll_to: "text" | {text | ref, in?, direction?, max_swipes?}}
 //   {long_press: n | [x, y] | {ref | x, y, ms?}}   {drag: {from, to, ms?} | [x1, y1, x2, y2]}
 //   {pinch: {ref | x, y, scale}}               {button: "home" | "lock" | "volume_up" | "volume_down"}
-//   {launch: "bundle" | {bundle, fresh?}}      {wait: ms}
+//   {launch: "bundle" | {bundle, fresh?}}      {wait: ms}       {back: true}
+//   {handoff: {kind, text}} hands a step to the owner on the phone (no input until Done, or {handoff: false})
 //   {wait_until: "text" | {text, gone?, ms?} | {settled: true, ms?}}
 extension Computer {
     static let keyText: [String: String] = ["return": "\n", "enter": "\n", "delete": "\u{8}", "backspace": "\u{8}", "tab": "\t", "space": " ", "escape": "\u{1b}"]
@@ -131,21 +132,46 @@ extension Computer {
         if let text = action["type"]?.text {
             if let ref = action["ref"] {
                 try await tap(try point(ref))
-                await sleep(seconds: 0.25)
             }
+            // Keys go to the focused field; a tap takes a moment to focus one (seen on the phone:
+            // text typed right after the tap went nowhere). Wait for a field to be focused, up to
+            // 2 s, then type anyway and say when none was.
+            let focusWait = min(2, max(0.2, until - now() - 1))
+            let focused = await waitForFocus(seconds: focusWait)
+            let focusNote = focused ? "" : "; no field was focused when the text went (waited \(Int((focusWait * 1000).rounded())) ms), so it may have gone nowhere"
             let hidden = describe(action).hasSuffix("(hidden)")
             let via = action["via"]?.string == "paste" ? "pasted" : "typed"
-            var pasteNote = ""
+            let clear = action["clear"]?.bool ?? false
+            var note = ""
             if via == "pasted" {
-                pasteNote = try await paste(text, clear: action["clear"]?.bool ?? false, until: until)
+                note = try await paste(text, clear: clear, until: until)
             } else {
-                try await type(text, clear: action["clear"]?.bool ?? false)
+                note = try await type(text, clear: clear, hidden: hidden)
             }
             // What the field holds now, so the model sees at once whether the text arrived whole.
             let reads = await fieldValue(timeout: min(1.5, max(0.3, until - now() - 0.2)))
             let readBack = reads.map { hidden ? "; the field now holds \($0.count) characters" : "; the field now reads \"\($0.count > 200 ? String($0.prefix(190)) + "…" : $0)\"" }
                 ?? "; the field could not be read back (no focused field answered in time), so check the elements or the picture"
-            return ("type", "\(describe(action)) (\(via))\(readBack)\(pasteNote)")
+            return ("type", "\(describe(action)) (\(via))\(readBack)\(focusNote)\(note)")
+        }
+        if action["back"] != nil {
+            return ("back", try await back(until: until))
+        }
+        if let spec = action["handoff"] {
+            if case .bool(false) = spec {
+                guard let current = handoff.value, current.done == nil else { return ("handoff", "handoff: nothing is handed to the owner") }
+                handoff.value = nil
+                emit(.handoffEnded(id: current.id, how: "takenBack"))
+                return ("handoff", "handoff: taken back (\(current.kind): \"\(current.text.prefix(60))\"); inputs are sent again")
+            }
+            let kind = (spec["kind"]?.string ?? "other").lowercased()
+            let kinds = ["passcode", "password", "verification", "payment", "other"]
+            guard kinds.contains(kind) else { throw ActionFailure(message: "handoff kind is one of \(kinds.joined(separator: ", "))", delivery: .notSent) }
+            guard let text = spec.text ?? spec["text"]?.text, !text.isEmpty else { throw ActionFailure(message: "handoff takes {kind, text}: what the owner must do themselves on the phone; or false to take the step back", delivery: .notSent) }
+            let h = Handoff(id: UUID().uuidString, kind: kind, text: String(text.prefix(300)), requested: Date())
+            handoff.value = h
+            emit(.handoffRequested(id: h.id, kind: kind, text: h.text, app: lastForeground?.describe))
+            return ("handoff", "handed to the owner (\(kind)): \"\(h.text.prefix(80))\", shown on the phone with a Done button. Keep calling look every few seconds, or {wait_until: {handoff_done: true, ms: 10000}}; no input is sent until the owner taps Done or you send {handoff: false}; status shows handoff: waiting|done")
         }
         if let key = action["key"]?.text {
             let k = key.lowercased()
@@ -244,18 +270,56 @@ extension Computer {
     /// The whole text as key presses in one request. Clearing deletes what the focused field holds
     /// with Delete keys in the same request: WDA's element clear retries until the value is empty,
     /// which a field like Safari's address bar never reports (that took 25 s).
-    func type(_ text: String, clear: Bool) async throws {
+    /// `clear` is checked: when the field still holds something besides the text afterwards (the
+    /// cursor was not at the end, or a field reports a placeholder as its value), the field is
+    /// cleared through WDA's element clear once (bounded at 3 s) and the text typed again; the
+    /// answer says what happened. Returns a note for the answer.
+    @discardableResult
+    func type(_ text: String, clear: Bool, hidden: Bool = false) async throws -> String {
         var deletes = 0
+        var before: (id: String, value: String?)?
         if clear {
-            let active = try? await runner.call("GET", "/element/active", timeout: 2)
-            let id = active?["ELEMENT"]?.string ?? active?["element-6066-11e4-a52e-4f735466cecf"]?.string
-            if let id, let value = try? await runner.call("GET", "/element/\(id)/attribute/value", timeout: 2), let s = value.string {
-                deletes = min(400, s.count)
-            }
+            before = await focusedField(timeout: 2)
+            if let s = before?.value { deletes = min(400, s.count) }
         }
         let keys = Array(repeating: "\u{8}", count: deletes) + text.map(String.init)
         guard keys.count <= 2000 else { throw ActionFailure(message: "at most 2000 characters at a time", delivery: .notSent) }
         _ = try await runner.call("POST", "/wda/keys", ["value": .array(keys.map(JSON.string))], timeout: 3 + 0.06 * Double(keys.count))
+        guard clear, let id = before?.id else { return "" }
+        guard let after = await fieldValue(timeout: 1), after != text, !after.isEmpty, after != (before?.value ?? "") || before?.value == nil else { return "" }
+        // Something is left that the deletes did not remove: clear the element itself, then type again.
+        let cleared = (try? await runner.call("POST", "/element/\(id)/clear", [:], timeout: 3, countsAsMiss: false)) != nil
+        guard cleared else { return "; clear: the field still held \(hidden ? "\(after.count) characters" : "\"\(after.prefix(60))\"") after \(deletes) deletes, and the runner could not clear it in 3 s" }
+        _ = try await runner.call("POST", "/wda/keys", ["value": .array(text.map { .string(String($0)) })], timeout: 3 + 0.06 * Double(text.count))
+        return "; clear: the field still held \(hidden ? "\(after.count) characters" : "\"\(after.prefix(60))\"") after \(deletes) deletes, so it was cleared again and the text typed again"
+    }
+
+    /// Whether a field is focused, waiting up to `seconds` for one (polled every 150 ms).
+    func waitForFocus(seconds: Double) async -> Bool {
+        let deadline = now() + seconds
+        while true {
+            if await focusedField(timeout: 1) != nil { return true }
+            if now() >= deadline { return false }
+            await sleep(seconds: 0.15)
+        }
+    }
+
+    /// `{back: true}`: the navigation bar's back button when the last read listed one (a button in
+    /// the top left corner), else an edge swipe from the left, which most apps take as back. The
+    /// answer says which, and the model sees the result in the read. No app-specific rule.
+    func back(until: Double) async throws -> String {
+        let screen = try await screenSize(until: until)
+        let top = lastAll.filter { e in
+            e.type == "Button" && e.frame.x < 70 && e.frame.y < 130 && e.frame.y + e.frame.height > 20 && e.frame.width < 180 && e.frame.height < 70 && !e.fromPicture
+        }.sorted { ($0.frame.y, $0.frame.x) < ($1.frame.y, $1.frame.x) }
+        if let button = top.first {
+            let p = (x: button.frame.x + button.frame.width / 2, y: button.frame.y + button.frame.height / 2)
+            try await tap(p)
+            return "back: tapped the top-left button \(button.text.isEmpty ? "" : "\"\(button.text)\" ")at [\(Int(p.x)), \(Int(p.y))]"
+        }
+        let y = screen.height / 2
+        try await gesture((2, y, screen.width * 0.6, y), seconds: 0.3, until: until)
+        return "back: no back button was listed in the top left, so an edge swipe from the left was sent (what most apps take as back)"
     }
 
     /// The focused field's id and value, or nil when nothing is focused or the runner does not say.
@@ -390,6 +454,15 @@ extension Computer {
     /// Reads the tree every quarter second until the text is there (or gone), or the screen holds still
     /// for two reads in a row. Not finding it is a fact, not a failure: the model decides.
     func waitUntil(_ spec: JSON, until: Double) async throws -> String {
+        if spec["handoff_done"]?.bool == true {
+            let started = now()
+            let limit = Swift.min(started + Swift.min(10, Swift.max(0.2, (spec["ms"]?.double ?? 5000) / 1000)), until)
+            while now() < limit {
+                if !handoffWaiting { return "wait_until: the owner is done after \(Int(((now() - started) * 1000).rounded())) ms" }
+                await sleep(seconds: Swift.min(0.25, Swift.max(0, limit - now())))
+            }
+            return "wait_until: the owner is not done yet after \(Int(((limit - started) * 1000).rounded())) ms; call it again, or look"
+        }
         let settled = spec["settled"]?.bool ?? (spec.string == "settled")
         let text = settled && spec.string == "settled" ? nil : (spec.string ?? spec["text"]?.string)
         let gone = spec["gone"]?.bool ?? false

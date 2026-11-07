@@ -152,7 +152,12 @@ func flattenXML(_ data: Data) -> (elements: [Element], root: (label: String?, na
 }
 
 func listable(_ elements: [Element], _ size: ScreenSize) -> [Element] {
-    elements.filter { e in
+    // The same element twice (an app that mirrors a control into a second accessibility element at
+    // the same place with the same text, seen in WeChat) is listed once.
+    var seen = Set<String>()
+    return elements.filter { e in
+        let key = "\(e.type)|\(e.text)|\(Int(e.frame.x))|\(Int(e.frame.y))|\(Int(e.frame.width))|\(Int(e.frame.height))"
+        guard seen.insert(key).inserted else { return false }
         guard !e.text.isEmpty else { return false }
         let f = e.frame
         guard f.x + f.width > 0 && f.y + f.height > 0 && f.x < size.width && f.y < size.height else { return false }
@@ -169,10 +174,15 @@ extension Runner {
     /// The source without visible, accessible, enabled and index: `visible` alone costs 2 s against 0.6 s
     /// for Settings; what is on screen is decided from the frames instead. `format` is "json" or "xml"
     /// (WDA's JSON adds each element's custom actions, one accessibility round trip per element).
+    /// Read without a session: WDA serves `/source` and `/wda/activeAppInfo` outside one (queued on
+    /// its main thread all the same), so a look never waits on a session open and a session ended
+    /// after a slow action does not cost the next read anything. The settings (deadline, detection
+    /// point, depth) live in WDA's process, set by the first session of the runner's life.
     func tree(timeout: Double, format: String = "json") async throws -> (elements: [Element], foreground: Foreground) {
         let xml = format.lowercased() == "xml"
-        async let source = call("GET", "/source?format=\(xml ? "xml" : "json")&excluded_attributes=visible,accessible,enabled,index", timeout: timeout)
-        async let app = try? call("GET", "/wda/activeAppInfo", timeout: min(timeout, 2))
+        await ensureSettings(timeout: min(timeout, 3))
+        async let source = raw("GET", "/source?format=\(xml ? "xml" : "json")&excluded_attributes=visible,accessible,enabled,index", timeout: timeout)
+        async let app = try? raw("GET", "/wda/activeAppInfo", timeout: min(timeout, 2))
         let (sourceValue, appValue) = (try await source, await app)
         let appName = appValue?["name"]?.string.flatMap { $0.isEmpty ? nil : $0 }
         if xml {
@@ -208,6 +218,11 @@ extension Runner {
     func read(timeout: Double, wantPicture: Bool = true, format: String = "json") async -> Reading {
         let started = now()
         let pictureAt = LockedBox<Double?>(nil)
+        // After a read that timed out, the next asks for half the tree's depth (a huge tree is what
+        // takes long); a read that came fast restores the full depth for the one after it.
+        let wantedDepth = nextDepth.value
+        if wantedDepth != depth.value { await useDepth(wantedDepth) }
+        let readDepth = depth.value
         async let treePart: Result<(elements: [Element], foreground: Foreground), Error> = {
             do { return .success(try await self.tree(timeout: timeout, format: format)) } catch { return .failure(error) }
         }()
@@ -219,9 +234,31 @@ extension Runner {
         var treeCame = false
         switch await treePart {
         case .success(let t): reading.elements = t.elements; reading.foreground = t.foreground; treeCame = true
-        case .failure(let e): reading.notes.append("no element tree: \(e)")
+        case .failure(let e):
+            // A snapshot the runner refused at once (the app's main loop was busy for the moment:
+            // "did not confirm its main run loop is responsive", a transition still running) is
+            // asked for once more within the read's time. A timed-out one is not: the runner is
+            // still serving it, and a second request would only queue behind it.
+            let left = started + timeout - now()
+            if (e as? RunnerError)?.delivery == .notSent, left > 1.2 {
+                await sleep(seconds: 0.3)
+                if let again = try? await self.tree(timeout: left - 0.4, format: format) {
+                    reading.elements = again.elements; reading.foreground = again.foreground; treeCame = true
+                    reading.notes.append("the element tree came on the second try (the first was refused: \(e))")
+                } else {
+                    reading.notes.append("no element tree: \(e); a second try within the read's time was refused too")
+                }
+            } else {
+                reading.notes.append("no element tree: \(e)")
+            }
         }
         let treeAt = now()
+        if treeCame {
+            if readDepth < 50 { reading.notes.append("the tree was read to depth \(readDepth) (the read before timed out at a greater depth); deeper parts of nested elements may be missing") }
+            if treeAt - started < 1.5, readDepth < 50 { nextDepth.value = min(50, readDepth * 2) }
+        } else if let last = reading.notes.last, last.contains("did not finish within") || last.contains("did not answer") {
+            nextDepth.value = max(12, readDepth / 2)
+        }
         switch await picturePart {
         case .success(let png)?: reading.png = png
         case .failure(let e)?: reading.notes.append("no screenshot: \(e)")
@@ -231,9 +268,16 @@ extension Runner {
         // snapshot while the screen moved on), the picture is taken again so the frames and the
         // pixels agree (seen on the phone: a tree of the inside of a chat with a picture of the list).
         if treeCame, reading.png != nil, let at = pictureAt.value, treeAt - at > 0.6, started + timeout - now() > 0.4 {
-            if let again = try? await screenshot(timeout: min(1.5, started + timeout - now())) {
+            if let first = reading.png, let again = try? await screenshot(timeout: min(1.5, started + timeout - now())) {
                 reading.png = again
                 reading.notes.append("the picture was taken again after the tree, which came \(Int(((treeAt - at) * 1000).rounded())) ms later than the first picture")
+                // The two pictures differ: the screen moved while the tree was read, so its frames
+                // may be off; the model should go by text (scroll_to, numbers) rather than points.
+                let before = PictureSketch(png: first), after = PictureSketch(png: again)
+                if after.differs(from: before) {
+                    let share = after.change(from: before).map { " (\(Int(($0.share * 100).rounded())) % of it)" } ?? ""
+                    reading.notes.append("screen: moving\(share): the picture changed while the tree was read, so frames and points may be off; prefer scroll_to, wait_until and element numbers over [x, y] taps")
+                }
             }
         }
         reading.ms = Int(((now() - started) * 1000).rounded())

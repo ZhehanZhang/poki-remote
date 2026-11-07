@@ -133,6 +133,8 @@ public final class PokiCore: Sendable {
     public func stop()
     public var events: AsyncStream<CoreEvent> { get }
     public func resolveApproval(id: String, approved: Bool)
+    public func handoffDone(id: String)       // the owner tapped Done on a step the model handed to them
+    public var handoff: Handoff? { get }      // the step still waiting, if any (id, kind, text, requested)
     public func handle(_ request: RelayRequest) async -> RelayResponse   // also for local tests
 }
 
@@ -142,8 +144,13 @@ public enum CoreEvent: Sendable {
     case toolFinished(ToolActivity, ToolOutcome, ToolFacts)   // ToolFacts: app name, ~96 px JPEG thumbnail
     case approvalRequested(Approval)          // id, app, summary, expires
     case approvalEnded(id: String, approved: Bool?)  // nil: expired
+    case handoffRequested(id: String, kind: String, text: String?, app: String?)  // kind: passcode | password | verification | payment | other
+    case handoffEnded(id: String, how: String)       // "done" (the owner tapped Done) or "takenBack" ({handoff: false})
 }
 ```
+
+`CoreConfig.accessibilityDeadline` (2 s) is WDA's check that the app's main loop answers before a
+tree is read; 0 turns it off (`POKI_AX_DEADLINE` in the simulator check compares both).
 
 `ToolFacts.thumbnail` is a JPEG about 96 pixels wide (a few kB). ActivityKit's content state is
 limited to 4 kB, so the app writes the thumbnail to its app group and the Live Activity reads it from
@@ -234,6 +241,33 @@ Each answer is facts only: the app in front, numbered elements, what each action
   it, and putting the clipboard back before the owner answers pastes the owner's own text (seen on
   the phone, Nov 7 2026 12:30 am ET: the owner's clipboard went into JD's search box). While the
   field has not shown the text the answer says `iOS may be asking the owner to allow the paste`.
+- **`clear: true` is checked**: when the field still holds something besides the text afterwards
+  (the cursor was not at the end; a field that reports its placeholder as its value), the element is
+  cleared through WDA once (3 s) and the text typed again; the answer says so.
+- **Typing waits for a field to be focused** (polled every 150 ms, up to 2 s): a tap takes a moment
+  to focus a field, and a search field that animates in focuses late. None focused: the text is
+  typed anyway and the answer says `no field was focused when the text went`.
+- **`{back: true}`**: the top-left button of the last read (a navigation bar's back button) is
+  tapped, else an edge swipe from the left is sent; the answer says which. No app-specific rule.
+- **The same element twice** (same type, text and frame, as an app that mirrors a control into a
+  second accessibility element) is listed once.
+- **Hand-off to the owner, by the model's judgement** (`{handoff: {kind, text}}`, kind one of
+  passcode, password, verification, payment, other): a step the model will not do itself (a password,
+  a human verification, a checkout it was told to leave) is shown on the phone in the Live Activity
+  with a Done button (`handoffRequested`). Until the owner taps Done (`handoffDone(id:)`) or the model
+  sends `{handoff: false}`, no input is sent (`not_sent`, with the picture, so the model is never
+  blind), every `look` works, `status` shows `handoff: waiting (kind) since …`, and `{wait_until:
+  {handoff_done: true, ms?}}` waits up to 10 s. The model is told to keep polling and go on with the
+  task rather than end its work; the `handoff: done at …` line is reported once. When the model
+  stands down is its own call (the owner, Nov 7 2026); PokiCore decides nothing but the sensitive
+  actions above.
+- **Never an answer that halts the model** (the owner's rule, Nov 7 2026): while the runner is up
+  and a screenshot comes, every `look` and `do` answers with the picture and something to go on, and
+  `isError` is set only when nothing could be read or nothing at all was sent. A failed action with a
+  read, a stale number, a busy runner (the picture comes with `not_sent`), a runner that is starting
+  (the first start after a restart can wait for the owner's passcode; the answer says to call again
+  every few seconds) are plain answers. With no tree, the text read from the picture is listed and
+  tappable, and the note says to tap points on the picture or call look again.
 - **Locked phone**: `do` checks `/wda/locked` first and sends nothing but buttons while locked
   (`screen: locked`); `look` says so too. Unknown counts as unlocked.
 - **Approvals**: the owner's time on an approval does not count against the actions or the read;
@@ -275,6 +309,19 @@ Each answer is facts only: the app in front, numbered elements, what each action
   keyboard's looping slide-to-type introduction. A call that finds the runner `.starting` (restarting, or woken from idle by
   the app) waits for it, checking every 250 ms for up to `runnerWait` (15 s) within its deadline, then
   goes on; a `.failed` runner is answered at once with its fix.
+- **Reads need no session.** `/source` and `/wda/activeAppInfo` are served outside a session (queued
+  on WDA's main thread all the same), so a `look` never waits on a session open, and a session ended
+  after a slow action costs the next read nothing. WDA's settings (the deadline, the detection
+  point, the depth) live in its process: the first session of the runner's life sets them, and a
+  restarted runner gets them again. Actions still run in the one session.
+- **A huge tree backs off in depth.** `snapshotMaxDepth` starts at WDA's 50; after a read that timed
+  out the next read asks for half the depth (never under 12, set through the session's settings) and
+  says so (`the tree was read to depth 25 …`); a read that came within 1.5 s restores the depth for
+  the one after it. A refused snapshot (the app's main loop busy for the moment) is asked for once
+  more within the read's time.
+- **A moving screen is marked.** When the tree came over 0.6 s after the picture, the picture is
+  taken again and compared with the first; if they differ the note says `screen: moving (N % of it)`
+  and tells the model to prefer scroll_to, wait_until and element numbers over [x, y] taps.
 - **An action this side gives up on ends the session; a read keeps it.** WDA serves every request
   but a few (status, screenshot, ending a session) one after another on its main thread, and goes on
   serving a request after the client has stopped waiting. Seen on the phone: a feed's tree took

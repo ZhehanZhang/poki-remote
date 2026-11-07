@@ -57,9 +57,17 @@ pub async fn start(device: &mut Device, bundle: &str, ios: &str) -> Result<Sessi
 }
 
 /// Waits until WebDriverAgent answers /status at `wda`, or the session ends, or `limit` passes.
-pub async fn wait_ready(session: &mut Session, wda: SocketAddr, limit: Duration) -> Result<()> {
-    let until = Instant::now() + limit;
+/// After `slow` without an answer, `on_slow` is called once: the usual cause is iOS asking the
+/// owner for the passcode (once after a restart or a force quit), which can take minutes, so the
+/// limit is long and the caller tells the owner rather than starting over (a new prompt each time).
+pub async fn wait_ready(session: &mut Session, wda: SocketAddr, limit: Duration, slow: Duration, on_slow: impl FnOnce()) -> Result<()> {
+    let started = Instant::now();
+    let until = started + limit;
+    let mut on_slow = Some(on_slow);
     loop {
+        if started.elapsed() > slow {
+            if let Some(f) = on_slow.take() { f(); }
+        }
         if session.is_finished() {
             let result = session.await.map_err(|e| Failure::new(e.to_string()))?;
             let detail = match result {

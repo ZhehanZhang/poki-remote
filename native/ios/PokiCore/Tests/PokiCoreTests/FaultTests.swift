@@ -372,7 +372,7 @@ final class FaultTests: XCTestCase {
         wda.source([("Button", "Photo"), ("Button", "Delete")], app: "Photos")
         _ = await core.call("look", [:])
         let result = await core.call("do", ["actions": [["tap": 1], ["tap": 2]]])
-        XCTAssertTrue(result.isError)
+        XCTAssertFalse(result.isError, "something was sent and the screen was read: not an error answer")
         XCTAssertTrue(result.text.contains("tap \"Photo\" (sent"), result.text)
         XCTAssertTrue(result.text.contains("not_sent from action 2: approval_required"), result.text)
         XCTAssertTrue(result.text.contains("Actions 1 to 1 were sent"), result.text)
@@ -545,5 +545,163 @@ final class ShopTestTests: XCTestCase {
         _ = await core.call("look", [:])
         let result = await core.call("do", ["actions": [["tap": 1]]])
         XCTAssertTrue(result.text.contains("this element fills the screen, so the tap went to its centre at [195, 422]"), result.text)
+    }
+}
+
+/// The owner's rule for the gym (Nov 7 2026): while the runner is up and a screenshot works, every
+/// answer carries the screen and something to go on; no error answer halts the model.
+final class GymTests: XCTestCase {
+    func testAFailedActionWithAReadIsNotAnErrorAnswer() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 1 }
+        _ = await core.call("look", [:])
+        wda.set("POST /wda/tap") { _ in (500, ["value": ["error": "unknown error", "message": "tap failed"]]) }
+        let result = await core.call("do", ["actions": [["tap": [100, 120]], ["tap": [100, 160]]]])
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("error: action 1 was not sent"), result.text)
+        XCTAssertTrue(result.text.contains("elements"), result.text)
+        XCTAssertNotNil(result.jpeg)
+    }
+
+    func testABusyRunnerAnswersWithThePicture() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 3)
+        wda.delay("GET /wda/locked", 3)
+        _ = await core.call("look", [:])
+        wda.delay("GET /wda/activeAppInfo", 2)
+        let tap = await core.call("do", ["actions": [["tap": [100, 120]]]])
+        XCTAssertTrue(tap.text.hasPrefix("not_sent: the runner is still finishing"), tap.text)
+        XCTAssertNotNil(tap.jpeg, "the screenshot is served apart from the queue")
+        XCTAssertFalse(tap.isError)
+    }
+
+    func testTypingWaitsForAFieldToBeFocusedAndSaysWhenNoneWas() async {
+        let (core, wda, _) = makeCore()
+        let field = FaultTests.Field()
+        field.install(wda)
+        // The field focuses 0.5 s after the tap (a late-focus field).
+        let focusedAt = LockedBox<Double?>(nil)
+        wda.set("POST /wda/tap") { _ in focusedAt.value = Date().timeIntervalSince1970 + 0.5; return (200, ["value": .null]) }
+        wda.set("GET /element/active") { _ in
+            guard let at = focusedAt.value, Date().timeIntervalSince1970 >= at else { return (404, ["value": ["error": "no such element", "message": "none"]]) }
+            return (200, ["value": ["ELEMENT": "E1"]])
+        }
+        _ = await core.call("look", [:])
+        let typed = await core.call("do", ["actions": [["type": "abc", "ref": 1]]])
+        XCTAssertTrue(typed.text.contains("the field now reads \"abc\""), typed.text)
+        XCTAssertFalse(typed.text.contains("no field was focused"), typed.text)
+        focusedAt.value = nil
+        let none = await core.call("do", ["actions": [["type": "xyz"]]])
+        XCTAssertTrue(none.text.contains("no field was focused when the text went"), none.text)
+    }
+
+    func testClearIsCheckedAndDoneAgainWhenSomethingIsLeft() async {
+        let (core, wda, _) = makeCore()
+        let field = FaultTests.Field()
+        field.install(wda)
+        field.value.value = "old text"
+        // The deletes remove nothing (the cursor sits at the start); the element clear works.
+        wda.set("POST /wda/keys") { [value = field.value] body in
+            for key in body?["value"]?.array ?? [] where key.string != "\u{8}" { value.update { $0 += key.string ?? "" } }
+            return (200, ["value": .null])
+        }
+        wda.set("POST /element/E1/clear") { [value = field.value] _ in value.value = ""; return (200, ["value": .null]) }
+        _ = await core.call("look", [:])
+        let typed = await core.call("do", ["actions": [["type": "new", "clear": true]]])
+        XCTAssertTrue(typed.text.contains("clear: the field still held \"old textnew\" after 8 deletes, so it was cleared again and the text typed again"), typed.text)
+        XCTAssertTrue(typed.text.contains("the field now reads \"new\""), typed.text)
+    }
+
+    func testBackTapsTheTopLeftButtonOrSwipesFromTheEdge() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("NavigationBar", "General", [0, 44, 390, 44], [Node("Button", "Settings", [8, 50, 80, 32]), Node("StaticText", "General", [160, 50, 70, 32])]), Node("Cell", "About", [16, 100, 358, 44])], app: "Settings")
+        _ = await core.call("look", [:])
+        let back = await core.call("do", ["actions": [["back": true]]])
+        XCTAssertTrue(back.text.contains("back: tapped the top-left button \"Settings\" at [48, 66]"), back.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1)
+        wda.tree([Node("Cell", "A chat", [16, 100, 358, 44])], app: "WeChat")
+        _ = await core.call("look", [:])
+        let swipe = await core.call("do", ["actions": [["back": true]]])
+        XCTAssertTrue(swipe.text.contains("back: no back button was listed in the top left, so an edge swipe from the left was sent"), swipe.text)
+        let drag = wda.bodies("POST /wda/dragfromtoforduration").last ?? wda.bodies("POST /wda/pressAndDragWithVelocity").last
+        XCTAssertEqual(drag?["fromX"]?.double, 2)
+    }
+
+    func testTheSameElementTwiceIsListedOnce() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("Button", "Twin", [100, 300, 100, 44]), Node("Button", "Twin", [100, 300, 100, 44]), Node("Button", "Other", [100, 400, 100, 44])], app: "Gym")
+        let look = await core.call("look", [:])
+        XCTAssertEqual(look.text.components(separatedBy: "\"Twin\"").count - 1, 1, look.text)
+        XCTAssertTrue(look.text.contains("elements (2)"), look.text)
+    }
+
+    /// A snapshot the runner refuses at once (the app's main loop was busy for the moment) is asked
+    /// for again within the read's time; the model gets a tree, not a picture-only read.
+    func testARefusedTreeIsAskedForAgainWithinTheRead() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 3 }
+        let tries = LockedBox(0)
+        let good = LockedBox<FakeWDA.Route?>(nil)
+        wda.source([("Button", "General")])
+        wda.set("GET /source") { body in
+            let n = tries.update { $0 += 1; return $0 }
+            if n == 1 { return (500, ["value": ["error": "unknown error", "message": "The application with process identifier 42 did not confirm its main run loop is responsive within 2.0 second(s)"]]) }
+            return (200, ["value": ["type": "XCUIElementTypeApplication", "label": "Settings", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": [["type": "XCUIElementTypeButton", "label": "General", "rect": ["x": 16, "y": 100, "width": 358, "height": 44]]]]])
+        }
+        _ = good
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("the element tree came on the second try"), look.text)
+        XCTAssertTrue(look.text.contains("\"General\""), look.text)
+        XCTAssertEqual(tries.value, 2)
+    }
+
+    /// A step handed to the owner: the Live Activity gets the event, inputs are held (with the
+    /// picture), looks work, Done or a take-back ends it and the next answer says so once.
+    func testAHandoffHoldsInputsUntilTheOwnerIsDone() async {
+        let (core, wda, _) = makeCore()
+        let events = LockedBox<[CoreEvent]>([])
+        Task { for await e in core.events { events.update { $0.append(e) } } }
+        _ = await core.call("look", [:])
+        let handed = await core.call("do", ["actions": [["handoff": ["kind": "password", "text": "Enter your Apple ID password"]]]])
+        XCTAssertFalse(handed.isError, handed.text)
+        XCTAssertTrue(handed.text.contains("handed to the owner (password): \"Enter your Apple ID password\""), handed.text)
+        XCTAssertTrue(handed.text.contains("handoff: waiting (password) since"), handed.text)
+        var id: String?
+        let asked = await eventually { events.value.contains { if case .handoffRequested(let i, "password", "Enter your Apple ID password", _) = $0 { id = i; return true }; return false } }
+        XCTAssertTrue(asked, "\(events.value)")
+        let held = await core.call("do", ["actions": [["tap": [100, 120]]]])
+        XCTAssertTrue(held.text.hasPrefix("not_sent: a step is handed to the owner (password"), held.text)
+        XCTAssertNotNil(held.jpeg)
+        XCTAssertFalse(held.isError)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 0)
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("handoff: waiting (password)"), look.text)
+        let status = await core.call("status", [:])
+        XCTAssertTrue(status.text.contains("handoff: waiting (password) since"), status.text)
+        let waited = await core.call("do", ["actions": [["wait_until": ["handoff_done": true, "ms": 400]]]])
+        XCTAssertTrue(waited.text.contains("the owner is not done yet"), waited.text)
+        core.handoffDone(id: id ?? "")
+        let ended = await eventually { events.value.contains(.handoffEnded(id: id ?? "", how: "done")) }
+        XCTAssertTrue(ended)
+        let after = await core.call("do", ["actions": [["tap": [100, 120]]]])
+        XCTAssertTrue(after.text.contains("handoff: done at"), after.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1)
+        let later = await core.call("look", [:])
+        XCTAssertFalse(later.text.contains("handoff:"), "reported once: \(later.text)")
+        // A take-back.
+        let second = await core.call("do", ["actions": [["handoff": "Check out yourself"]]])
+        XCTAssertTrue(second.text.contains("handed to the owner (other)"), second.text)
+        let back = await core.call("do", ["actions": [["handoff": false]]])
+        XCTAssertTrue(back.text.contains("handoff: taken back (other"), back.text)
+        let taken = await eventually { events.value.contains { if case .handoffEnded(_, "takenBack") = $0 { return true }; return false } }
+        XCTAssertTrue(taken)
+    }
+
+    func testAStartingRunnerIsNotAnErrorAnswer() async {
+        let (core, _, host) = makeCore { $0.runnerWait = 0.3; $0.readTimeout = 0.5 }
+        host.state.value = .starting("the phone is asking the owner for the passcode")
+        let look = await core.call("look", [:])
+        XCTAssertFalse(look.isError, look.text)
+        XCTAssertTrue(look.text.contains("runner: starting (the phone is asking the owner for the passcode)"), look.text)
+        XCTAssertTrue(look.text.contains("call look or status again every few seconds"), look.text)
     }
 }
