@@ -79,6 +79,15 @@ public protocol CoreHost: AnyObject, Sendable {
     /// Text read from a PNG screenshot, used for elements an app collapsed. PokiCore answers it with
     /// Vision by default, so a host need not implement it.
     func recognizeText(inPNG png: Data) async -> [RecognizedText]?
+    /// A screenshot (PNG, one pixel per screen point is not required) that does not go through the
+    /// runner: the launcher's own path to the device (the DVT screenshot service over its tunnel, or
+    /// simctl on the simulator). Asked for only when the runner gives none (wedged, or restarting),
+    /// so a hung app never blinds the model. Nil (the default) means there is no such path.
+    func screenshotWithoutRunner() async -> Data?
+}
+
+extension CoreHost {
+    public func screenshotWithoutRunner() async -> Data? { nil }
 }
 
 public enum RelayState: Sendable, Equatable {
@@ -180,6 +189,7 @@ public final class PokiCore: @unchecked Sendable {
         continuation = c
         runner = Runner(url: config.runnerURL, transport: transport)
         runner.accessibilityDeadline = config.accessibilityDeadline
+        runner.screenshotFallback = { [weak host] in await host?.screenshotWithoutRunner() }
         let emit: @Sendable (CoreEvent) -> Void = { [c] event in c!.yield(event) }
         approvals = Approvals(emit: emit)
         computer = Computer(runner: runner, host: host, config: config, approvals: approvals, emit: emit)
@@ -321,7 +331,7 @@ public final class PokiCore: @unchecked Sendable {
         guard await gate.enter(waiting: config.busyWait) else {
             // The screenshot is served apart from the runner's queue, so a busy answer still shows
             // the screen (the owner's rule: every answer carries the picture while the runner is up).
-            return await computer.withPicture("busy: another call is still running (\(gate.current ?? "a tool")); nothing was sent. Call again in a moment.", timeout: 3, remember: false)
+            return await computer.withPicture("busy: another call is still running (\(gate.current ?? "a tool")); nothing was sent. Call again in a moment.", timeout: 3, remember: false, isErrorWithoutPicture: false)
         }
         gate.current = "\(name): \(activity.summary)"
         emit(.toolStarted(activity))

@@ -727,4 +727,95 @@ final class GymTests: XCTestCase {
         XCTAssertTrue(tap.text.contains("this element is a Alert, a container; the elements inside it are"), tap.text)
         XCTAssertTrue(tap.text.contains("\"Cancel\"") && tap.text.contains("\"OK\"") && tap.text.contains("tap one of those"), tap.text)
     }
+
+    /// The gym's dense screen hung the app's main loop: WDA's queue held one GET /wda/activeAppInfo
+    /// for over a minute while its status answered, so nothing restarted it. Now a stall older than
+    /// `wedgedAfter` with a queued probe unanswered restarts the runner, and the next call says so.
+    func testAWedgedRunnerIsRestartedAndTheNextCallSaysWhy() async {
+        let (core, wda, host) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
+        core.runner.wedgedAfter = 0.6
+        _ = await core.call("look", [:])
+        // Every queued request waits behind the hung one (the fake has no queue of its own).
+        for route in ["GET /source", "GET /wda/activeAppInfo", "GET /screenshot", "POST /appium/settings", "POST /session"] { wda.delay(route, 30) }
+        _ = await core.call("look", [:])
+        let stuck = await core.call("look", [:])
+        XCTAssertTrue(stuck.text.contains("still finishing an earlier") && stuck.text.contains("restarted on its own if it is not through"), stuck.text)
+        XCTAssertNotNil(core.runner.busyWith)
+        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        XCTAssertEqual(host.restarts.value, 1, "the wedged runner was restarted")
+        XCTAssertNil(core.runner.busyWith, "the stall went with the old runner")
+        XCTAssertTrue(core.runner.lastRestart.value?.contains("wedged on ") ?? false, core.runner.lastRestart.value ?? "nil")
+        // The new runner answers; the first call says what happened, once.
+        wda.set("GET /wda/activeAppInfo") { _ in (200, ["value": ["bundleId": "com.apple.Preferences", "name": "Settings"]]) }
+        wda.set("GET /screenshot") { _ in (200, ["value": .string(Data("png".utf8).base64EncodedString())]) }
+        wda.set("POST /appium/settings") { _ in (200, ["value": .null]) }
+        wda.set("POST /session") { _ in (200, ["value": ["sessionId": "s2"]]) }
+        wda.source([("Button", "General"), ("Button", "Privacy")])
+        let after = await core.call("look", [:])
+        XCTAssertTrue(after.text.hasPrefix("runner: the runner wedged on "), after.text)
+        XCTAssertTrue(after.text.contains("this is the new runner"), after.text)
+        XCTAssertFalse(after.isError)
+        let again = await core.call("look", [:])
+        XCTAssertFalse(again.text.contains("wedged"), "reported once: \(again.text)")
+    }
+
+    /// A stall is bookkeeping about one runner process: a refused connection, or a runner the app
+    /// is seen restarting, clears it (seen in the gym: the first do after a restart still waited on
+    /// the old runner's request).
+    func testAStallDoesNotOutliveTheRunner() async {
+        let (core, wda, host) = makeCore { $0.readTimeout = 0.5; $0.actionCap = 1 }
+        core.runner.wedgedAfter = 60
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 30)
+        _ = await core.call("look", [:])
+        XCTAssertNotNil(core.runner.busyWith)
+        wda.set("GET /status") { _ in throw TransportError.refused }
+        _ = try? await core.runner.raw("GET", "/status", timeout: 1)
+        XCTAssertNil(core.runner.busyWith, "refused: the process is gone")
+
+        wda.set("GET /status") { _ in (200, ["value": ["ready": true]]) }
+        _ = await core.call("look", [:])
+        XCTAssertNotNil(core.runner.busyWith)
+        host.state.value = .starting("relaunching")
+        Task { try? await Task.sleep(nanoseconds: 300_000_000); host.state.value = .running }
+        wda.source([("Button", "General")])
+        let after = await core.call("look", [:])
+        XCTAssertNil(core.runner.busyWith, "a restart seen clears it: \(after.text)")
+        XCTAssertTrue(after.text.contains("General"), after.text)
+    }
+
+    /// 200 rows outran the action's time: the scroll stops in time and says how far it got and that
+    /// calling it again goes on, instead of "may have been delivered".
+    func testAScrollThatOutrunsTheActionsTimeSaysHowFarItGot() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 3 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let n = swipes.update { $0 += 1; return $0 }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        let result = await core.call("do", ["actions": [["scroll_to": ["text": "Row 250", "max_swipes": 12]]]])
+        XCTAssertFalse(result.text.contains("may have been delivered"), result.text)
+        XCTAssertTrue(result.text.contains("\"Row 250\" not seen yet; the action's time ran out"), result.text)
+        XCTAssertTrue(result.text.contains("call scroll_to again to go on"), result.text)
+        XCTAssertTrue(result.text.contains("(sent,"), result.text)
+        XCTAssertFalse(result.isError)
+    }
+
+    /// A host with its own way to the screen (the launcher's tunnel) gives the picture when the
+    /// runner cannot, so a hung app never blinds the model.
+    func testTheHostsOwnScreenshotIsUsedWhenTheRunnerGivesNone() async {
+        let host = FakeHost()
+        host.ownScreenshot.value = Data("own-png".utf8)
+        let (core, wda, _) = makeCore(host: host) { $0.readTimeout = 0.5 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /screenshot", 30)
+        let look = await core.call("look", [:])
+        XCTAssertEqual(look.jpeg, Data("jpeg:7".utf8), look.text)
+        XCTAssertTrue(look.text.contains("screenshot: taken apart from the runner"), look.text)
+        XCTAssertFalse(look.isError)
+    }
 }

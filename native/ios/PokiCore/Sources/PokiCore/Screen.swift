@@ -261,7 +261,14 @@ extension Runner {
         }
         switch await picturePart {
         case .success(let png)?: reading.png = png
-        case .failure(let e)?: reading.notes.append("no screenshot: \(e)")
+        case .failure(let e)?:
+            // The host's own path is fast and apart from the runner: it gets 2 s of its own.
+            if let fallback = screenshotFallback, let png = (try? await withDeadline(2, "the host's screenshot") { await fallback() }) ?? nil {
+                reading.png = png
+                reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
+            } else {
+                reading.notes.append("no screenshot: \(e)")
+            }
         case nil: break
         }
         // The tree and the picture are one moment: when the tree came well after the picture (a slow

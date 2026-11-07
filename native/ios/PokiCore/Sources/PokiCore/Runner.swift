@@ -91,8 +91,19 @@ public final class Runner: @unchecked Sendable {
     /// How many actions this side has given up on (sent, and not answered in time). A call compares
     /// it before and after an action to tell a timeout that reached the runner from one that did not.
     let actionsGivenUp = LockedBox(0)
-    /// What the runner is still finishing, if anything: "GET /source, 7 s ago".
-    public var busyWith: String? { stall.value.map { "\($0.path) from \(Int((now() - $0.since).rounded())) s ago" } }
+    /// What the runner is still finishing, if anything: "GET /source from 7 s ago (restarted on its
+    /// own if it is not through in 15 s)".
+    public var busyWith: String? { stall.value.map { "\($0.path) from \(Int((now() - $0.since).rounded())) s ago (the runner is restarted on its own if it is not through in \(Int(wedgedAfter)) s)" } }
+    /// A queued request this side gave up on that is still unanswered after this long, while a cheap
+    /// queued probe is not answered either, is a wedged runner (seen in the gym: an app whose main
+    /// loop hung held WDA's queue for over a minute, and every read, action and screenshot behind it;
+    /// WDA's own status answered, so the health probe saw nothing wrong). Nothing sent to it would
+    /// run, so it is restarted (`onUnhealthy`), and the next call says why.
+    var wedgedAfter: Double = 15
+    /// Why the runner was last restarted by this side, for the next call to report (once).
+    let lastRestart = LockedBox<String?>(nil)
+    /// The host's own way to a screenshot (apart from the runner), used when the runner gives none.
+    var screenshotFallback: (@Sendable () async -> Data?)?
     /// Requests WDA answers apart from its queue (FBRoute `.standalone`).
     static let standalone: Set<String> = ["GET /status", "GET /screenshot", "DELETE /session"]
 
@@ -159,6 +170,8 @@ public final class Runner: @unchecked Sendable {
                 try await transport.send(method: method, url: target, body: body?.data(), timeout: timeout)
             }
         } catch TransportError.refused {
+            // A refused connection is a runner process that is gone: what it was finishing went with it.
+            stall.value = nil
             miss()
             throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted: call look again in about 10 s", delivery: .notSent, silent: true)
         } catch let error as DeadlineExceeded {
@@ -205,7 +218,8 @@ public final class Runner: @unchecked Sendable {
     /// phone: every look in WeChat opened a session that queued behind the read before it). An
     /// action or a session open that times out ends the session, so nothing runs late.
     private func abandon(_ method: String, _ path: String, endSession: Bool = true) {
-        stall.update { if $0 == nil { $0 = ("\(method) \(Self.short(path))", now()) } }
+        let stalled: (path: String, since: Double) = ("\(method) \(Self.short(path))", now())
+        if stall.update({ s -> Bool in if s == nil { s = stalled; return true }; return false }) { watch(stalled) }
         guard endSession, let id = state.value.session, path.hasPrefix("/session/\(id)") else { return }
         actionsGivenUp.update { $0 += 1 }
         forgetSession()
@@ -213,6 +227,23 @@ public final class Runner: @unchecked Sendable {
             _ = try? await withDeadline(2.5, "ending the session") {
                 try await transport.send(method: "DELETE", url: URL(string: url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/session/\(id)")!, body: nil, timeout: 2)
             }
+        }
+    }
+
+    /// The watchdog for one stall: after `wedgedAfter`, when the same request is still unanswered, a
+    /// cheap queued probe (3 s) tells whether the queue moves at all; when it does not, the runner is
+    /// wedged and restarted. A runner that is through by then has cleared the stall on its own.
+    private func watch(_ stalled: (path: String, since: Double)) {
+        Task { [weak self] in
+            guard let wedgedAfter = self?.wedgedAfter else { return }
+            try? await Task.sleep(nanoseconds: UInt64(max(0, wedgedAfter) * 1_000_000_000))
+            guard let self, let s = self.stall.value, s.since == stalled.since else { return }
+            if (try? await self.raw("GET", "/wda/activeAppInfo", timeout: 3, countsAsMiss: false)) != nil { return }
+            guard let still = self.stall.value, still.since == stalled.since else { return }
+            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+            self.lastRestart.value = "the runner wedged on \(still.path) (unanswered for \(Int((now() - still.since).rounded())) s), so it was restarted at \(f.string(from: Date()))"
+            self.forgetRunner()
+            self.onUnhealthy?()
         }
     }
 
@@ -235,7 +266,7 @@ public final class Runner: @unchecked Sendable {
 
     func forgetSession() { state.update { $0.session = nil } }
     /// The runner was restarted: its settings are the defaults again.
-    func forgetRunner() { forgetSession(); settingsApplied.value = false; depth.value = 50 }
+    func forgetRunner() { forgetSession(); settingsApplied.value = false; depth.value = 50; stall.value = nil }
 
     /// Whether the runner is through with the request this side gave up on: a cheap queued request
     /// (opening the session, or the active app) answered within `timeout` means the queue has

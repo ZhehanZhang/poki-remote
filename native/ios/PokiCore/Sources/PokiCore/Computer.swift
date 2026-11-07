@@ -261,12 +261,20 @@ final class Computer: @unchecked Sendable {
 
     /// An answer with nothing done but the picture (served apart from WDA's queue), so a busy runner
     /// never leaves the model blind: it sees the screen and the next look is not an error.
-    func withPicture(_ text: String, timeout: Double, remember: Bool = true) async -> ToolResult {
-        guard timeout > 0.3, let png = try? await runner.screenshot(timeout: min(3, timeout)) else { return ToolResult(text: text, jpeg: nil, isError: true) }
+    /// `isErrorWithoutPicture: false` for an answer that already says what to do next (wait for the
+    /// runner): it is not an error even when the runner is too far gone to give the picture.
+    func withPicture(_ text: String, timeout: Double, remember: Bool = true, isErrorWithoutPicture: Bool = true) async -> ToolResult {
+        guard timeout > 0.3, let png = try? await runner.screenshot(timeout: min(3, timeout)) else {
+            // The runner gives none: the host's own path to the screen, when it has one.
+            if timeout > 0.3, let png = await runner.screenshotFallback?(), let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6) {
+                return ToolResult(text: text + "\nscreenshot: the screen now, taken apart from the runner (nothing was sent)", jpeg: jpeg, isError: false)
+            }
+            return ToolResult(text: text + "\nscreenshot: none (the runner did not give one either)", jpeg: nil, isError: isErrorWithoutPicture)
+        }
         if remember { lastPNG = png }
         let size = try? await screenSize(until: now() + 1)
         let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6)
-        return ToolResult(text: text + (jpeg == nil ? "" : "\nscreenshot: the screen now (nothing was sent)"), jpeg: jpeg, isError: jpeg == nil)
+        return ToolResult(text: text + (jpeg == nil ? "" : "\nscreenshot: the screen now (nothing was sent)"), jpeg: jpeg, isError: jpeg == nil && isErrorWithoutPicture)
     }
 
     /// The `handoff:` line: a step handed to the owner that is waiting, or just done (reported once).
@@ -294,11 +302,18 @@ final class Computer: @unchecked Sendable {
         let until = now() + config.toolDeadline
         if let blocked = await waitForRunner(until: until) { return blocked }
         async let locked = isLocked()
-        let result = await readAndReply(until: until, full: full)
+        let result = restartNote(await readAndReply(until: until, full: full))
         guard await locked else { return result }
         var lines = result.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         lines.insert("screen: locked (the owner has to unlock the phone before anything can be done)", at: min(1, lines.count))
         return ToolResult(text: lines.joined(separator: "\n"), jpeg: result.jpeg, isError: result.isError)
+    }
+
+    /// The answer with the reason for a restart this side made, reported once: the model learns why
+    /// its last calls got nothing and that the runner is a fresh one (its numbers start over).
+    func restartNote(_ result: ToolResult) -> ToolResult {
+        guard let why = runner.lastRestart.update({ r -> String? in defer { r = nil }; return r }) else { return result }
+        return ToolResult(text: "runner: \(why); this is the new runner\n" + result.text, jpeg: result.jpeg, isError: result.isError)
     }
 
     /// WDA's lock state, without a session; unknown counts as unlocked (a failed read must not block).
@@ -311,24 +326,35 @@ final class Computer: @unchecked Sendable {
     /// call's deadline) and then goes on; a failed runner is answered at once, with its fix.
     func waitForRunner(until: Double) async -> ToolResult? {
         var state = host.runnerState()
+        // A runner seen starting is a new process: what the last one was finishing, and its settings,
+        // went with it (seen in the gym: after a restart the first call still waited on a request the
+        // old runner had been serving).
+        var restarted = false
+        if case .starting = state { restarted = true }
         let waitUntil = min(now() + config.runnerWait, until - config.readTimeout - 1)
         while case .starting = state, now() < waitUntil {
             await sleep(seconds: 0.25)
             state = host.runnerState()
         }
+        if restarted { runner.forgetRunner() }
         guard !state.isRunning else { return nil }
+        let why = runner.lastRestart.value.map { "runner: \($0)\n" } ?? ""
         // A runner that is starting (the first start after a restart can wait for the owner's
         // password or Developer Mode on the phone) is not an error: the model keeps polling look
         // or status every few seconds and goes on when it is up; the owner is told on the phone.
         if case .failed = state {
             return ToolResult(text: "runner: \(state.describe)\nNothing was sent. Fix it on the phone, then call look again.", jpeg: nil, isError: true)
         }
-        return ToolResult(text: "runner: \(state.describe)\nNothing was sent. It is still starting (the first start after a restart can wait for the owner to enter their password on the phone, which the phone asks them for); call look or status again every few seconds, and go on with the task when it answers with the screen.", jpeg: nil, isError: false)
+        return ToolResult(text: "\(why)runner: \(state.describe)\nNothing was sent. It is still starting (the first start after a restart can wait for the owner to enter their password on the phone, which the phone asks them for); call look or status again every few seconds, and go on with the task when it answers with the screen.", jpeg: nil, isError: false)
     }
 
     // MARK: do
 
     func act(actions: [JSON], full: Bool) async -> ToolResult {
+        restartNote(await actNow(actions: actions, full: full))
+    }
+
+    func actNow(actions: [JSON], full: Bool) async -> ToolResult {
         var started = now()
         var until = started + config.toolDeadline
         if let blocked = await waitForRunner(until: until) { return blocked }
@@ -336,7 +362,7 @@ final class Computer: @unchecked Sendable {
         // A runner still finishing a request this side gave up on gets nothing new: what is sent now
         // would wait its turn and run late, after the model had moved on.
         if await !runner.waitUntilFree(timeout: min(config.actionCap, until - now() - config.readTimeout - 0.5)), let busy = runner.busyWith {
-            return await withPicture("not_sent: the runner is still finishing an earlier \(busy); nothing was sent. Call look again in a few seconds; it answers when the runner is through.", timeout: until - now() - 0.5)
+            return await withPicture("not_sent: the runner is still finishing an earlier \(busy); nothing was sent. Call look again in a few seconds; it answers when the runner is through, or after the restart.", timeout: until - now() - 0.5, isErrorWithoutPicture: false)
         }
 
         // A locked phone takes no input but the buttons; the owner unlocks it.
@@ -344,7 +370,7 @@ final class Computer: @unchecked Sendable {
         // the model sees the screen, waits, or takes the step back.
         let harmless = actions.allSatisfy { $0["wait"] != nil || $0["wait_until"] != nil || $0["handoff"] != nil }
         if !harmless, handoffWaiting, let h = handoff.value {
-            return await withPicture("not_sent: a step is handed to the owner (\(h.kind): \"\(h.text.prefix(80))\"), so no input is sent until they tap Done on the phone or you send {handoff: false}. Keep polling with look, or {wait_until: {handoff_done: true, ms: 10000}}.", timeout: until - now() - 0.5)
+            return await withPicture("not_sent: a step is handed to the owner (\(h.kind): \"\(h.text.prefix(80))\"), so no input is sent until they tap Done on the phone or you send {handoff: false}. Keep polling with look, or {wait_until: {handoff_done: true, ms: 10000}}.", timeout: until - now() - 0.5, isErrorWithoutPicture: false)
         }
         let onlyButtons = actions.allSatisfy { $0["button"] != nil || $0["wait"] != nil }
         if !onlyButtons, await isLocked() {

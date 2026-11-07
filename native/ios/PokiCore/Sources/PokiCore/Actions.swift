@@ -455,19 +455,26 @@ extension Computer {
                 return !layout.covers(e).contains { $0.frame.contains(c) }
             }
         }
+        let wanted = wantedText.map { "\"\($0.prefix(40))\"" } ?? "element \(spec["ref"]!.int!)"
         var all = lastAll, swipes = 0, last: String?
-        while hit(all) == nil, swipes < max, until - now() > 0.9 {
-            try await gesture(try swipePath(region, fingerGoes), seconds: 0.3, rest: 0.1, until: until)
+        // Each swipe needs its own time and a read after it; when the action's time is nearly up the
+        // scroll stops where it is and says so, so the model calls it again rather than being told
+        // that something unknown may have happened (seen in the gym: 200 rows outran the action's 6 s).
+        while hit(all) == nil, swipes < max {
+            guard until - now() > 2.5 else {
+                return "\(swipes) swipes, \(wanted) not seen yet; the action's time ran out before the list was through (\(Int(config.actionCap)) s): call scroll_to again to go on from here"
+            }
+            try await gesture(try swipePath(region, fingerGoes), seconds: 0.3, rest: 0.1, until: until - 1.2)
             swipes += 1
             await sleep(seconds: 0.15)
             guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { continue }
             let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
-            if signature == last { return "\(swipes) swipes, not found: the list stopped moving" }
+            if signature == last { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
             last = signature
             all = seen.elements
         }
         if let found = hit(all) { return "\(swipes) swipes, found at \(found.frame.described)" }
-        return "\(swipes) swipes, not found\(swipes >= max ? " within \(max) swipes" : "")"
+        return "\(swipes) swipes, \(wanted) not seen yet within \(max) swipes: call scroll_to again to go on (max_swipes takes up to 12)"
     }
 
     /// Reads the tree every quarter second until the text is there (or gone), or the screen holds still

@@ -119,6 +119,8 @@ final class FakeHost: CoreHost, @unchecked Sendable {
     func jpeg(fromPNG png: Data, width: Int, quality: Double) throws -> Data { widths.update { $0.append(width) }; return Data("jpeg:\(png.count)".utf8) }
     func runnerState() -> RunnerState { state.value }
     func restartRunner() { restarts.update { $0 += 1 } }
+    let ownScreenshot = LockedBox<Data?>(nil)
+    func screenshotWithoutRunner() async -> Data? { ownScreenshot.value }
 }
 
 /// One end of a fake WebSocket; the test plays the relay on the other end.

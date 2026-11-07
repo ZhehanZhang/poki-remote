@@ -125,6 +125,9 @@ public protocol CoreHost: AnyObject, Sendable {
     /// Text read from the screenshot, for elements an app collapsed. Optional: PokiCore's default
     /// answers it with Vision (VNRecognizeTextRequest), so the app need not implement it.
     func recognizeText(inPNG png: Data) async -> [RecognizedText]?
+    /// A screenshot apart from the runner (the launcher's tunnel: the DVT screenshot service, or
+    /// simctl on the simulator), asked for only when the runner gives none. Default nil.
+    func screenshotWithoutRunner() async -> Data?
 }
 
 public final class PokiCore: Sendable {
@@ -340,6 +343,27 @@ Each answer is facts only: the app in front, numbered elements, what each action
   served apart from the queue). The next queued request that is answered clears the note. An action
   cut off after it reached the runner is `unknown`; one cut off while the session was still being
   opened is `not_sent`.
+- **A wedged runner is restarted on its own.** An app whose main loop hangs holds WDA's queue, and
+  every read, action and screenshot behind it, while WDA's own `GET /status` still answers, so the
+  health probe sees nothing wrong (seen in the CI gym, Nov 7 2026 2:30 am ET: a 3,000-element
+  screen held one `GET /wda/activeAppInfo` for 75 s; every call answered "still finishing an
+  earlier" and the screenshot timed out too). A stall older than 15 s (`Runner.wedgedAfter`) with a
+  cheap queued probe (3 s) unanswered is a wedge: PokiCore forgets the runner and asks the host to
+  restart it, and the first call that goes through starts with `runner: the runner wedged on GET
+  /wda/activeAppInfo (unanswered for 18 s), so it was restarted at 02:31:05; this is the new runner`
+  (reported once; a call while it is still starting says the same above `runner: starting`). The
+  busy note says so ahead of time: `… from 7 s ago (the runner is restarted on its own if it is not
+  through in 15 s)`. A stall never outlives the runner process: a refused connection, a restart
+  PokiCore asked for, or a runner the host reports as starting clears it (seen in the gym: the first
+  `do` after a restart still waited on the old runner's request). A busy, hand-off or
+  "another call is running" answer that says what to do next is not an error even when the runner
+  gives no picture.
+- **A scroll that outruns the action's time says how far it got.** `scroll_to` needs about 2.5 s for
+  a swipe and the read after it; when less is left it stops where it is: `4 swipes, "Row 250" not
+  seen yet; the action's time ran out before the list was through (6 s): call scroll_to again to go
+  on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
+  that stops moving says "its end, or the text is not in it"; the swipe limit reached says to call
+  again (`max_swipes` up to 12).
 - **An answer is never lost to a relay drop.** A call keeps running when the relay connection
   resets under it (seen on the phone: a three-action `do` answered "what was sent is unknown" when
   the tunnel reset mid-call, though the actions had gone). Its answer cannot go to the connection
