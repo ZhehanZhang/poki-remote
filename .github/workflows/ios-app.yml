@@ -84,7 +84,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO \
             MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
             ARCHS=arm64 | tee build/app.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)|\*\* " || true
-          test -d build/app/Build/Products/Release-iphoneos/Poki.app
+          grep -q "BUILD SUCCEEDED" build/app.log && test -d build/app/Build/Products/Release-iphoneos/Poki.app
 
       - name: Package the IPA
         run: |
