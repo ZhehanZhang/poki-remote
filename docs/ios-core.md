@@ -406,6 +406,12 @@ Each answer is facts only: the app in front, numbered elements, what each action
   runner still busy is waited for within the action's time (3 s at most); when it is not through
   the answer is `not_sent … nothing was typed … send the type again`, so the text is never
   typed twice and never left in doubt.
+- **A cut listing says what it left out, and scroll_to gives the found element's number.** A
+  listing stops at 120 lines (1,000 with full=true); the line after it counts what was left out by
+  type ("… 507 more not listed (Cell 500, Button 7)") and says that scroll_to with an element's text
+  finds it and gives its number: the read after a scroll_to ends with "found by scroll_to: 1506
+  Button "Found" [165,774,72,35] (tap 1506)", whether or not the listing reached it (the gym's
+  1,507-element grid had its state button at 1506).
 - **A scroll declares the end only after two confirmed unmoved swipes.** `scroll_to` ends with
   "the list stopped moving" only when two swipes in a row, each sent to a free runner and read
   after, left the list as it was. A swipe sent right after a wait for a busy runner does not count:

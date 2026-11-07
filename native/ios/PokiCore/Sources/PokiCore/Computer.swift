@@ -42,6 +42,10 @@ final class Computer: @unchecked Sendable {
     var lastTree: String?
     var lastPicture: PictureSketch?
 
+    /// The element the last scroll_to found, so the read after it can give its number (it may be
+    /// past the listing's limit: the gym's 1,507-element grid had its button at 1506).
+    var scrollFound: Element?
+
     var lastElements: [Element] { listed.map(\.element) }
     var layout: Layout { Layout(all: lastAll, screen: size ?? ScreenSize(width: 10_000, height: 10_000)) }
 
@@ -243,8 +247,23 @@ final class Computer: @unchecked Sendable {
             body = changed.prefix(Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
         } else {
             heading = prior.isEmpty ? "elements (\(shown.count)):" : fresh ? "elements (\(shown.count); a new screen: numbered from 1 again, the numbers of the read before no longer apply):" : "elements (\(shown.count); + new since the last read, ~ moved):"
-            body = shown.indices.prefix(full ? 1000 : Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
-            if !full, shown.count > Self.lineLimit { body.append("… \(shown.count - Self.lineLimit) more; full=true lists all") }
+            let limit = full ? 1000 : Self.lineLimit
+            body = shown.indices.prefix(limit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
+            if shown.count > limit {
+                // What was left out, by type, so the model knows what it cannot see (the gym's grid
+                // put the state button past the limit) and that scroll_to by text numbers any of them.
+                var byType: [String: Int] = [:]
+                for e in shown[limit...] { byType[e.type, default: 0] += 1 }
+                let types = byType.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+                body.append("… \(shown.count - limit) more not listed (\(types)); \(full ? "" : "full=true lists up to 1000; ")scroll_to with an element's text finds it and gives its number")
+            }
+        }
+        if let wanted = scrollFound {
+            // The element scroll_to found, with its number, listed whether or not the listing reached it.
+            scrollFound = nil
+            if let i = shown.firstIndex(where: { $0.key == wanted.key && $0.frame.described == wanted.frame.described }) ?? shown.firstIndex(where: { $0.key == wanted.key }) {
+                body.append("found by scroll_to: \(line(assigned[i]!, shown[i], " ").trimmingCharacters(in: .whitespaces)) (tap \(assigned[i]!))")
+            }
         }
         if pictureOnly { heading = "elements (\(shown.count), read from the picture because the element tree did not come in time; a number taps the text's centre):" }
         if !collapsed.isEmpty, !full { heading += "  ([collapsed] = one element whose parts are not in the tree; full=true adds the text read from the picture inside it, or tap a point on the screenshot)" }
@@ -367,6 +386,7 @@ final class Computer: @unchecked Sendable {
     }
 
     func actNow(actions: [JSON], full: Bool) async -> ToolResult {
+        scrollFound = nil
         var started = now()
         var until = started + config.toolDeadline
         if let blocked = await waitForRunner(until: until) { return blocked }

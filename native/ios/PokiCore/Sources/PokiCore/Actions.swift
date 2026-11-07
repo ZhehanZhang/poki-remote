@@ -494,7 +494,7 @@ extension Computer {
         // when under 1.6 s is left the scroll stops where it is and says so, so the model calls it
         // again rather than being told that something unknown may have happened.
         var all = lastAll, swipes = 0, last: String?, still = 0
-        func found(_ e: Element) -> String { "\(swipes) swipes, found at \(e.frame.described)" }
+        func found(_ e: Element) -> String { scrollFound = e; return "\(swipes) swipes, found at \(e.frame.described) (its number is in the list below)" }
         func notYet(_ why: String) -> String { "\(swipes) swipes, \(wanted) not seen yet; \(why): call scroll_to again to go on from here" }
         while hit(all) == nil, swipes < max {
             guard until - now() > 1.6 else { return notYet("the action's time ran out before the list was through (\(Int(Self.scrollCap)) s)") }

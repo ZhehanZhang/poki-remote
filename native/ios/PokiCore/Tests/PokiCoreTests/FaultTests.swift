@@ -429,6 +429,27 @@ final class FaultTests: XCTestCase {
         XCTAssertFalse(look.text.hasPrefix("error:"), look.text)
     }
 
+    /// The gym's 1,507-element grid: the button after the grid was element 1506, past the 1,000
+    /// lines full=true lists, so the agent could not tap it by number. A cut listing says what was
+    /// left out by type, and scroll_to's answer gives the found element's number.
+    func testACutListingSaysWhatWasLeftOutAndScrollToGivesTheNumber() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 20 }
+        let cells = (0..<1_100).map { i in Node("Cell", "Tile \(i)", [Double(i % 10) * 39, 100 + Double(i / 10) * 0.6, 39, 1]) }
+        wda.tree([Node("Other", "Grid", [0, 100, 390, 660], cells), Node("Button", "Found", [165, 774, 72, 35])], app: "Gym")
+        let look = await core.call("look", ["full": true])
+        XCTAssertTrue(look.text.contains("more not listed (Cell "), look.text)
+        XCTAssertTrue(look.text.contains("scroll_to with an element's text finds it and gives its number"), look.text)
+        XCTAssertFalse(look.text.contains("Button \"Found\""), "the button is past the listing limit: \(look.text.suffix(300))")
+        let scroll = await core.call("do", ["actions": [["scroll_to": "Found"]]])
+        XCTAssertTrue(scroll.text.contains("0 swipes, found at [165,774,72,35]"), scroll.text)
+        guard let line = scroll.text.split(separator: "\n").first(where: { $0.hasPrefix("found by scroll_to:") }) else { return XCTFail(scroll.text) }
+        XCTAssertTrue(line.contains("Button \"Found\" [165,774,72,35] (tap "), String(line))
+        let number = Int(line.split(separator: " ")[3]) ?? 0
+        XCTAssertGreaterThan(number, 1000, String(line))
+        let tap = await core.call("do", ["actions": [["tap": .number(Double(number))]]])
+        XCTAssertTrue(tap.text.contains("did: tap tap \"Found\" (sent,"), tap.text)
+    }
+
     /// The gym's 300 rows: a swipe sent right after a wait for a busy runner did not move the list
     /// (the app's main loop was serving the snapshot), the next read matched the one before, and
     /// scroll_to declared the end at row 180. Now the end takes two unmoved swipes in a row, each
@@ -958,6 +979,7 @@ final class GymTests: XCTestCase {
         let started = Date()
         let result = await core.call("do", ["actions": [["scroll_to": "Row 45"]]])
         XCTAssertTrue(result.text.contains("scroll_to \"Row 45\": 4 swipes, found at [16,320,358,44]"), result.text)
+        XCTAssertTrue(result.text.contains("found by scroll_to:") && result.text.contains("Cell \"Row 45\" [16,320,358,44] (tap "), result.text)
         XCTAssertGreaterThan(Date().timeIntervalSince(started), 3.5, "four 1 s swipes outlast the 3 s action cap: scroll_to has 12 s")
         XCTAssertTrue(wda.bodies("POST /wda/pressAndDragWithVelocity").allSatisfy { $0["holdDuration"]?.double == 0.05 })
     }
