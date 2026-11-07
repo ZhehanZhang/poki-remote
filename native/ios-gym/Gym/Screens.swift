@@ -123,6 +123,10 @@ struct DenseScreen: View {
                             .accessibilityElement().accessibilityLabel("cell \(i)")
                     }
                 }
+                // The cells are children of one container (as a feed's cells are in real apps), so a
+                // reader that caps children per element cuts inside the grid, not the Found button and
+                // the state label after it.
+                .accessibilityElement(children: .contain).accessibilityLabel("grid")
             }
             Button("Found") { state.set("Found tapped") }.buttonStyle(.borderedProminent)
         }
