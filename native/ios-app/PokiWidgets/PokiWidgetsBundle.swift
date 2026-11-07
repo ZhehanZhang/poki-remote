@@ -35,8 +35,12 @@ struct PokiLiveActivity: Widget {
                 MinimalView(state: state)
             }
             .keylineTint(state.accent)
-            .contentMargins(.horizontal, 16, for: .expanded)
-            .contentMargins(.bottom, 14, for: .expanded)
+            // The expanded island's corners are deep continuous curves (about 40 pt on iOS 27), so the
+            // content keeps well clear of them: 24 pt from the sides, 18 from the top and 22 from the
+            // bottom. The corner items (bear, status, the last line) sit inside those margins.
+            .contentMargins(.horizontal, 24, for: .expanded)
+            .contentMargins(.top, 18, for: .expanded)
+            .contentMargins(.bottom, 22, for: .expanded)
         }
     }
 }

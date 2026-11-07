@@ -37,15 +37,9 @@
 "Denied" = "Denied";
 "Code ready" = "Code ready";
 "Paired" = "Paired";
-"Agent started" = "Agent started";
 "Agent finished" = "Agent finished";
-"Working in %@" = "Working in %@";
-"Your agent is using this iPhone" = "Your agent is using this iPhone";
-"Your agent switched apps" = "Your agent switched apps";
 "Poki needs attention" = "Poki needs attention";
 "Pairing code %@" = "Pairing code %@";
 "Type it on the Pair with Poki screen in Settings" = "Type it on the Pair with Poki screen in Settings";
 "This iPhone is ready for Poki" = "This iPhone is ready for Poki";
 "The approval timed out" = "The approval timed out";
-"In %@" = "In %@";
-"On this iPhone" = "On this iPhone";
