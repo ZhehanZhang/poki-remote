@@ -154,8 +154,19 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
         check(false, "the \(name) row is on the menu"); return answer
     }
     answer = await call("open \(name)", "do", ["actions": [["tap": .number(Double(row))]]])
-    if !answer.contains("Gym: \(name)") { answer = await call("look at \(name)", "look") }
+    for i in 1...2 where !answer.contains("Gym: \(name)") { answer = await call("look at \(name)\(i == 1 ? "" : " (again)")", "look") }
     check(answer.contains("Gym: \(name)"), "the \(name) screen is in front")
+    return answer
+}
+
+/// scroll_to as an agent uses it: PokiCore stops when an action's time runs out and says to call
+/// again to go on; the agent calls again until the text is found or the list is through.
+@MainActor func scrollTo(_ text: String, step: String, budget: Double = 30, max: Int = 8) async -> String {
+    var answer = ""
+    for i in 1...max {
+        answer = await call(i == 1 ? step : "\(step) (again, \(i))", "do", ["actions": [["scroll_to": .string(text)]]], budget: budget)
+        if !(answer.contains("not seen yet") && answer.contains("call scroll_to again")) { break }
+    }
     return answer
 }
 
@@ -214,7 +225,7 @@ if let field = ref(in: a, "Paste here") {
 
 // 4. A long list: scroll_to by text, then tap.
 a = await open("list")
-let found = await call("scroll_to Row 250", "do", ["actions": [["scroll_to": "Row 250"]]], budget: 30)
+let found = await scrollTo("Row 250", step: "scroll_to Row 250")
 check(found.contains("found at") || found.contains("Row 250"), "scroll_to finds Row 250")
 a = found.contains("Row 250") ? found : await call("look for Row 250", "look")
 a = await tap("Row 250", in: a, expect: "Row 250 tapped")
@@ -238,7 +249,7 @@ check(lateShown.contains("late focus"), "typing lands in the field that took foc
 a = await open("dense")
 let dense = await call("look at 1,500 elements", "look", budget: 15)
 check(!dense.contains("HUNG"), "a dense tree is read")
-let foundButton = await call("scroll_to Found", "do", ["actions": [["scroll_to": "Found"]]], budget: 40)
+let foundButton = await scrollTo("Found", step: "scroll_to Found", budget: 40)
 a = foundButton.contains("Found") ? foundButton : await call("look for Found", "look", budget: 15)
 a = await tap("Found", in: a, type: "Button", expect: "Found tapped")
 
@@ -283,13 +294,15 @@ let deadDo = await call("do with the runner dead", "do", ["actions": [["swipe": 
 check(!deadDo.contains("HUNG") && !deadDo.contains("did: swipe"), "a do with a dead runner answers and sends nothing")
 if env["POKI_WDA_START"] != nil {
     // PokiCore asked the host to restart the runner; the look must come back by itself.
+    // A tree read ("app: Poki Gym"), not the picture-only reading the fallback screenshot gives
+    // while the runner is still down.
     var back = ""
-    for i in 1...20 {
+    for i in 1...25 {
         back = await call("look after the runner restart (\(i))", "look", budget: 30)
-        if back.contains("Gym:") { break }
+        if back.contains("app: Poki Gym") { break }
         try? await Task.sleep(nanoseconds: 3_000_000_000)
     }
-    check(back.contains("Gym:"), "look works again once the runner is back")
+    check(back.contains("app: Poki Gym"), "look reads the tree again once the runner is back")
     let afterDo = await call("do after the runner restart", "do", ["actions": [["swipe": "up"]]])
     check(afterDo.contains("did: swipe"), "do works again once the runner is back")
 }
