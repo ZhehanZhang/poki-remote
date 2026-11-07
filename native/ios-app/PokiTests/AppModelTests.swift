@@ -83,3 +83,24 @@ final class AppModelTests: XCTestCase {
         model.idleStopSeconds = 60
     }
 }
+
+@MainActor
+final class PasscodeTests: XCTestCase {
+    /// After a restart iOS asks for the passcode before the first automation. The launcher says so
+    /// (code "passcode"); the agent reads a plain "starting" with the reason, and the Live Activity
+    /// asks the owner; the hint clears when the runner answers.
+    func testPasscodeWaitIsNamedAndClears() {
+        let model = AppModel(launcher: FakeLauncher(), pairer: FakePairing())
+        model.loopback.simulate(.working(ms: 9))
+        model.runnerChanged(RunnerStatus(state: "launching"))
+        model.runnerChanged(RunnerStatus(state: "launching", detail: "no answer for 12 s", code: "passcode"))
+        XCTAssertTrue(model.passcodeHint)
+        let text = model.host.currentRunner.describe
+        XCTAssertTrue(text.contains("passcode"), text)
+        XCTAssertTrue(text.contains("Call again"), text)
+        XCTAssertTrue(text.hasPrefix("starting"), text)
+        model.runnerChanged(RunnerStatus(state: "running"))
+        XCTAssertFalse(model.passcodeHint)
+        XCTAssertTrue(model.host.currentRunner.isRunning)
+    }
+}

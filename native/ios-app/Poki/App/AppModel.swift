@@ -290,6 +290,9 @@ final class AppModel {
     /// The runner's state as the agent reads it. While the loopback is down, every pre-launch state
     /// is the same thing: waiting for the tunnel, said with the time it went and what to do.
     func coreState(of status: RunnerStatus) -> RunnerState {
+        if status.code == "passcode" {
+            return .starting("the phone is asking the owner for the passcode (iOS does this once before the first automation after a restart or a force quit); the Live Activity tells the owner; the runner starts the moment it is entered. Call again in about 10 s; nothing is lost and no action is needed from you")
+        }
         let preLaunch = ["connecting", "pairing", "tunnel", "waiting_network", "standby", "idle"].contains(status.state)
         if preLaunch, !loopback.isWorking, loopback.state != .checking || status.state == "waiting_network" {
             let since = loopback.droppedAt.map { " since \(Self.clock.string(from: $0))" } ?? ""
@@ -317,6 +320,17 @@ final class AppModel {
         default: break
         }
         if status.state != "launching" { launchingSince = nil; passcodeHint = false }
+        if status.code == "passcode", runner.code != "passcode" {
+            // iOS is asking for the passcode before the first UI automation after a restart. The
+            // launcher waits minutes for it; the person is asked on the Live Activity, and the agent
+            // reads a plain "starting" meanwhile (coreState).
+            passcodeHint = true
+            log.add("runner", "the runner has not answered for 12 s: asking the owner for the passcode on the Live Activity")
+            activity.update { $0.phase = .handoff; $0.handoff = .init(id: Self.runnerPasscodeHandoff, kind: .runnerPasscode, text: nil, app: nil, since: Date()) }
+        }
+        if status.isRunning, activity.state.handoff?.id == Self.runnerPasscodeHandoff {
+            activity.update { $0.handoff = nil; $0.phase = .idle; $0.headline = "Ready for the agent" }
+        }
         if status.code == "ddi_bad", runner.code != "ddi_bad" {
             log.add("ddi", "the phone would not install the disk image: downloading it again")
             diskImage.redownload()
@@ -407,7 +421,26 @@ final class AppModel {
             let model = Unmanaged<AppModel>.fromOpaque(observer).takeUnretainedValue()
             Task { @MainActor in model.pauseRunner(reason: "Stopped from the Live Activity") }
         }, ApprovalMailbox.stopRunner as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(center, observer, { _, observer, _, _, _ in
+            guard let observer else { return }
+            let model = Unmanaged<AppModel>.fromOpaque(observer).takeUnretainedValue()
+            Task { @MainActor in model.handoffDone() }
+        }, ApprovalMailbox.handoffDone as CFString, nil, .deliverImmediately)
     }
+
+    /// The person tapped "Done, carry on" on the Live Activity's "Your turn" card.
+    func handoffDone() {
+        guard let id = ApprovalMailbox.drainHandoffDone() else { return }
+        log.add("handoff", "done by the owner: \(id)")
+        if id == Self.runnerPasscodeHandoff {
+            // The runner's own launch: the launcher notices by itself when the runner answers.
+            activity.update { $0.handoff = nil; $0.phase = runner.isRunning ? .idle : .working; $0.headline = runner.isRunning ? "Ready for the agent" : "Starting the runner" }
+        } else {
+            activity.update { $0.handoff = nil; $0.phase = .working; $0.headline = "Carrying on" }
+            core.handoffDone(id: id)
+        }
+    }
+    static let runnerPasscodeHandoff = "runner-passcode"
 
     /// A decision from the Live Activity. Allow is tapped on the expanded Dynamic Island, which takes
     /// about a second to collapse; input sent at once can land on it (iOS then opens Poki). So the
