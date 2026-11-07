@@ -17,6 +17,10 @@ final class LoopbackMonitor {
     private(set) var state = State.checking
     private(set) var onWiFi = false
     private(set) var checkedAt: Date?
+    /// When the loopback last stopped answering after it had worked; nil while it works.
+    private(set) var droppedAt: Date?
+    /// Called on every change of state, with the old and the new one.
+    var onChange: ((State, State) -> Void)?
     private var timer: Timer?
     private let path = NWPathMonitor()
     private var running = false
@@ -41,11 +45,13 @@ final class LoopbackMonitor {
 
     var isWorking: Bool { if case .working = state { true } else { false } }
 
-    /// Checks every 3 s until `pause`.
-    func resume() {
-        guard timer == nil else { return }
+    /// Checks every `interval` seconds until `pause` (3 s in front; the app uses a slower one in the
+    /// background while an agent works, so a dropped tunnel is noticed and named).
+    func resume(every interval: TimeInterval = 3) {
+        if let timer, abs(timer.timeInterval - interval) < 0.5 { return }
+        timer?.invalidate()
         check()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in Task { @MainActor in self?.check() } }
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in Task { @MainActor in self?.check() } }
     }
 
     func pause() { timer?.invalidate(); timer = nil }
@@ -59,7 +65,13 @@ final class LoopbackMonitor {
             let next: State = result.outcome == "connected" ? .working(ms: result.milliseconds) : loopbackInterface() == nil ? .off : .noAnswer
             // Only a change is published, so the screens are not redrawn every 3 s (a redraw while
             // the person drags a list makes scrolling stutter).
-            if !Self.same(next, state) { state = next; checkedAt = Date() }
+            if !Self.same(next, state) {
+                let old = state
+                state = next; checkedAt = Date()
+                if case .working = old, !isWorking { droppedAt = Date() }
+                if isWorking { droppedAt = nil }
+                onChange?(old, next)
+            }
         }
     }
 

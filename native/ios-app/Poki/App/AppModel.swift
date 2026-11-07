@@ -85,6 +85,7 @@ final class AppModel {
         eventsTask = Task { [weak self, core] in
             for await event in core.events { self?.handle(event) }
         }
+        loopback.onChange = { [weak self] old, new in self?.loopbackChanged(from: old, to: new) }
         if !diskImage.isReady { Task { await diskImage.download() } }
         if UserDefaults.standard.bool(forKey: "pokiSample") { loadSample() }
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
@@ -95,6 +96,7 @@ final class AppModel {
     /// Poki came to the front: turn on again if it was on, check the loopback live, and finish a
     /// setup step the person just did in Settings.
     func becameActive() {
+        inFront = true
         loopback.resume()
         // Poki in front while an agent's step is under way: nobody opened it on purpose. A tap near the
         // top of the screen hit the expanded Dynamic Island (iOS opens the activity's app), or the agent
@@ -107,7 +109,10 @@ final class AppModel {
         if let step = guiding, isDone(step) { stopGuide() }
     }
 
-    func wentToBackground() { loopback.pause() }
+    /// In the background the loopback is still watched while Poki is on (the agent's runner depends on
+    /// it): every 6 s, light enough for the location-kept background time.
+    func wentToBackground() { inFront = false; sessionOn ? loopback.resume(every: 6) : loopback.pause() }
+    private var inFront = true
 
     /// Poki is being closed: end the runner now (the launcher kills its process) instead of leaving
     /// iOS's automation banner up for half a minute. iOS gives a few seconds for this.
@@ -139,6 +144,7 @@ final class AppModel {
         guard !sessionOn else { return }
         problem = nil
         guard let pairing = pairingPath else { problem = "Pair this iPhone first (Setup)."; return }
+        if !inFront { loopback.resume(every: 6) }
         guard diskImage.isReady, diskImage.recheck() else {
             problem = "The developer disk image is not downloaded yet (Setup > Pair). It is needed once."
             Task { await diskImage.download() }
@@ -163,6 +169,7 @@ final class AppModel {
     func stopSession() {
         guard sessionOn else { return }
         wantsOn = false
+        if !inFront { loopback.pause() }
         log.add("session", "turned off: ending the runner")
         core.stop()
         Task { await RunnerProbe.shutdown() }
@@ -259,6 +266,33 @@ final class AppModel {
         }
     }
 
+    /// The loopback came or went. Going: logged with the time, and the agent's status says so instead
+    /// of "Checking pairing". Back: the launcher tries at once instead of waiting out its backoff
+    /// (the runner dies with the tunnel, so every drop costs a restart).
+    private func loopbackChanged(from old: LoopbackMonitor.State, to new: LoopbackMonitor.State) {
+        let wasWorking = { if case .working = old { true } else { false } }()
+        if wasWorking, !loopback.isWorking {
+            log.add("loopback", "dropped: 10.7.0.1 stopped answering (\(loopback.text)); the runner cannot survive this")
+        } else if !wasWorking, loopback.isWorking, old != .checking {
+            log.add("loopback", "back: 10.7.0.1 answers again" + (sessionOn && !runner.isRunning && !runnerPaused ? "; starting the runner now" : ""))
+            if sessionOn, !runner.isRunning, !runnerPaused { launcher.restart() }
+        }
+        if sessionOn { host.update(runner: coreState(of: runner)) }
+    }
+
+    /// The runner's state as the agent reads it. While the loopback is down, every pre-launch state
+    /// is the same thing: waiting for the tunnel, said with the time it went and what to do.
+    private func coreState(of status: RunnerStatus) -> RunnerState {
+        let preLaunch = ["connecting", "pairing", "tunnel", "waiting_network", "standby", "idle"].contains(status.state)
+        if preLaunch, !loopback.isWorking, loopback.state != .checking || status.state == "waiting_network" {
+            let since = loopback.droppedAt.map { " since \(Self.clock.string(from: $0))" } ?? ""
+            let why = loopback.state == .noAnswer ? "the proxy app's tunnel is on but does not reflect 10.7.0.1" : "the loopback at 10.7.0.1 is not answering"
+            return .starting("waiting for the loopback\(since): \(why). The owner turns the proxy app's tunnel (Surge, Loon, Shadowrocket or sing-box) back on; the runner starts again by itself within seconds of that. Nothing on the phone changes meanwhile")
+        }
+        return status.coreState
+    }
+    private static let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
+
     private func runnerChanged(_ status: RunnerStatus) {
         if status != runner { log.add("runner", "\(status.state)\(status.detail.map { ": \($0)" } ?? "")") }
         // Events from a launcher that was stopped for idle are old news.
@@ -281,7 +315,7 @@ final class AppModel {
             diskImage.redownload()
         }
         runner = status
-        host.update(runner: status.coreState)
+        host.update(runner: coreState(of: status))
         if status.state == "failed" {
             activity.update { $0.phase = .problem; $0.headline = status.fix ?? status.detail ?? "The runner stopped" }
         } else if !status.isRunning {
