@@ -34,6 +34,8 @@ final class Computer: @unchecked Sendable {
     var nextRef = 1
     /// Every element of the latest tree with a frame, listed or not (for what covers what).
     var lastAll: [Element] = []
+    /// When the latest tree was read (a `wait_until: settled` takes a fresh one as its first sample).
+    var lastTreeAt: Double?
     var lastForeground: Foreground?
     var size: ScreenSize?
     var lastPNG: Data?
@@ -207,6 +209,7 @@ final class Computer: @unchecked Sendable {
                 listed.append((assigned[i]!, e))
             }
             lastAll = reading.elements
+            lastTreeAt = now()
         } else {
             refs = [:]
             listed = []
@@ -521,6 +524,10 @@ final class Computer: @unchecked Sendable {
                 switch failure {
                 case let e as ActionFailure: delivery = e.delivery
                 case let e as RunnerError: delivery = e.delivery
+                case is DeadlineExceeded where action["wait_until"] != nil || action["wait"] != nil:
+                    // A wait only reads: nothing was sent, whatever the time it ran out of.
+                    delivery = .notSent
+                    why += " (it only reads the screen; nothing was sent)"
                 case is DeadlineExceeded where !runner.hasSession && runner.actionsGivenUp.value == givenUp:
                     // The time ran out while a session was still being opened: nothing reached the phone.
                     delivery = .notSent

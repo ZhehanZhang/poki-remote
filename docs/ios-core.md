@@ -388,6 +388,12 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
   the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
   parts arrive 3-4 s after the page loads).
+- **A wait never runs out as unknown, and "settled" starts from the read before it.** `wait_until`
+  only reads, so when its time runs out the action is `not_sent`, never "may have been delivered".
+  `settled` compares two reads; the latest read, when the call before ended within 5 s, is the first,
+  so on a slow runner (the CI simulator read in 4.5 s, and two reads did not fit the action's 6 s) a
+  screen that matches the read before is "held still" after one read. Each read inside the wait
+  stays within the action's time, margin included.
 - **Typing waits for a busy runner, and sends nothing when it is not through.** The keys queue
   behind whatever the runner is still serving (the focus reads this side gave up on while the
   keyboard came up: on the CI simulator the runner stood still for seconds at the keyboard's first
