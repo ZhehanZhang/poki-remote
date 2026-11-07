@@ -388,6 +388,11 @@ Each answer is facts only: the app in front, numbered elements, what each action
   `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
   the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
   parts arrive 3-4 s after the page loads).
+- **A read never waits on a session open for its snapshot limits.** Limits that differ from the
+  runner's are set through the session's settings when a session is open and the runner is free;
+  otherwise they are noted and the next open sends them with the rest of the settings (the soak on
+  CI: a look after a timed-out read set smaller limits, the open it needed hung, and the look
+  waited 3 s on it past its read, up to the backstop).
 - **A wait never runs out as unknown, and "settled" starts from the read before it.** `wait_until`
   only reads, so when its time runs out the action is `not_sent`, never "may have been delivered".
   `settled` compares two reads; the latest read, when the call before ended within 5 s, is the first,

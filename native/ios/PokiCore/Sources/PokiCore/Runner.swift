@@ -177,9 +177,13 @@ public final class Runner: @unchecked Sendable {
     let settingsApplied = LockedBox(false)
 
     /// The snapshot limits for the next read, applied through the session's settings when they differ
-    /// from what the runner has (a queued request, bounded at 2 s).
+    /// from what the runner has (a queued request, bounded at 2 s). Without a session they are noted
+    /// for the open to apply (every open sends the settings): a read never waits on a session open
+    /// for them (the soak: an open that hung held a look 3 s past its read, up to the backstop).
     func useLimits(_ wanted: SnapshotLimits) async {
-        guard wanted != limits.value, let id = try? await session(timeout: 3) else { return }
+        guard wanted != limits.value else { return }
+        guard hasSession, busyWith == nil else { limits.value = wanted; return }
+        guard let id = try? await session(timeout: 2) else { return }
         if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted.depth)), "snapshotMaxChildren": .number(Double(wanted.children))]], timeout: 2, countsAsMiss: false)) != nil {
             limits.value = wanted
         }

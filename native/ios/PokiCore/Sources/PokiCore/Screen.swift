@@ -294,11 +294,22 @@ extension Runner {
             if treeCame, let again = try? await screenshot(timeout: max(0.5, min(1.5, started + timeout + extra - now()))) {
                 reading.png = again
                 reading.notes.append("the screenshot came on the second try (the first: \(e))")
-            } else if let fallback = screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil {
-                reading.png = png
-                reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
+            } else if let fallback = screenshotFallback {
+                // The answer says what became of the host's path, so a missing picture can be traced.
+                let began = now()
+                let hostResult: Result<Data?, Error>
+                do { hostResult = .success(try await withDeadline(6, "the host's screenshot") { await fallback() }) } catch { hostResult = .failure(error) }
+                switch hostResult {
+                case .success(let png?):
+                    reading.png = png
+                    reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
+                case .success(nil):
+                    reading.notes.append("no screenshot: \(e); the host's own path gave none either (\(Int(((now() - began) * 1000).rounded())) ms)")
+                case .failure(let hostError):
+                    reading.notes.append("no screenshot: \(e); \(hostError)")
+                }
             } else {
-                reading.notes.append("no screenshot: \(e)")
+                reading.notes.append("no screenshot: \(e); the host has no path of its own to the screen")
             }
         case nil: break
         }
