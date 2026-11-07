@@ -79,6 +79,10 @@ targets:
     dependencies:
       - target: Poki
       - package: PokiCore
+    settings:
+      base:
+        # @testable import Poki re-reads the app's bridging header, which includes the launcher's C header.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../launcher/include
   PokiWidgets:
     type: app-extension
     platform: iOS
