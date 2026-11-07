@@ -1,4 +1,4 @@
-# Poki on the iPhone, standalone: where it stands (Nov 7 2026, 1:10 am ET)
+# Poki on the iPhone, standalone: where it stands (Nov 7 2026, 1:40 am ET)
 
 A note for Joseph and anyone picking this up. Written by the app thread of ZhehanZ's fork
 (ZhehanZhang/poki-remote); the work lives on the `dev/` branches named below.
@@ -29,6 +29,7 @@ The model stays in the cloud (claude.ai, Claude Code) and talks to the phone thr
 | `dev/live-activity` | Live Activity views and controller | 421c214 merged |
 | `dev/ios-runner` | WDA patch, PokiRunnerHost, runner CI | a3e80ea merged |
 | `dev/cf-relay` | Workers relay | deployed |
+| `dev/ios-gym` | Poki Gym: a simulator app with one screen per hard case for UI automation (animation that never idles, alerts, the paste prompt, long lists, sheets, late focus, dense and duplicated trees, a web view, a navigation stack); the ios-core simulator job runs look/do scenarios against it | new |
 | `dev/upstream-ios-standalone`, `dev/upstream-mcp-agent-tools` | Copies staged for upstream | pushed to upstream Nov 6 |
 
 Tags: none yet. Versions come from `native/ios-app/VERSION`; `release.yml` on a `vX.Y.Z` tag builds
@@ -44,6 +45,24 @@ both IPAs with that version.
 
 Details per round: `native/ios-app/CHANGELOG-round.md`. What only the phone can confirm:
 `native/ios/PokiCore/UNVERIFIED.md`, `docs/device-test-checklist.md`.
+
+## The owner's rules for this layer (Nov 7 2026)
+
+1. The runner never crashes or wedges by itself, whatever the task or its length; only the owner's
+   Stop or the agent withdrawing ends it. It must never be unable to return up-to-date information.
+2. The tree is readable at any moment, under unfinished or continuous animation, live, cheap on the
+   device, and it must match the screenshot (no dangerous mismatch). The tree stays the primary source.
+3. The MCP never stalls the agent. "The animation is not over, you cannot read the tree" is a forbidden
+   answer. While the runner is up and a screenshot is possible, every call answers with the picture and
+   something actionable. Success rate under complex situations is the metric.
+4. The first runner start after a restart may need the owner's passcode: detected, shown on the Live
+   Activity, and the agent reads a plain "starting" meanwhile (the launcher waits up to 5 min).
+5. Owner hand-off is the agent's discretion (a verification, a password, a payment): the agent can hand
+   a screen to the owner through the Live Activity ("Your turn", a Done button), inputs pause, reads
+   keep working, and the agent keeps polling instead of ending its chat. We build the channel; when the
+   model stands down is the model's call, except the sensitive-action approvals already built.
+6. All of it must work both with the Poki agent system in this repo and with a raw agent such as Claude
+   connected directly to the MCP.
 
 ## Open problems, in order of pain
 
