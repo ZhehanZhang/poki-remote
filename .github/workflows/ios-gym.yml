@@ -1,0 +1,57 @@
+# Builds Poki Gym (native/ios-gym) for the iOS Simulator and opens every scenario once, with a
+# screenshot of each, so the app that the look/do scenarios run against is known to work.
+name: iOS gym
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev/ios-gym, dev/ios-app]
+    paths: [native/ios-gym/**, .github/workflows/ios-gym.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  gym:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - name: Project
+        run: brew install xcodegen && xcodegen generate --spec native/ios-gym/project.yml
+      - name: Build for the simulator
+        run: |
+          set -o pipefail
+          xcodebuild build -project native/ios-gym/PokiGym.xcodeproj -scheme PokiGym -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/gym \
+            CODE_SIGNING_ALLOWED=NO | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/gym/Build/Products/Debug-iphonesimulator/PokiGym.app
+          (cd build/gym/Build/Products/Debug-iphonesimulator && zip -qr "$GITHUB_WORKSPACE/PokiGym.app.zip" PokiGym.app)
+      - name: Open every scenario on the simulator
+        run: |
+          set -euo pipefail
+          APP=build/gym/Build/Products/Debug-iphonesimulator/PokiGym.app
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys;r=[x for x in json.load(sys.stdin)["runtimes"] if x["isAvailable"] and x["platform"]=="iOS"];print(r[-1]["identifier"])')
+          TYPE=$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys;d=[x for x in json.load(sys.stdin)["devicetypes"] if x["name"].startswith("iPhone") and "Pro" in x["name"] and "Max" not in x["name"]];print(d[-1]["identifier"])')
+          UDID=$(xcrun simctl create poki-gym "$TYPE" "$RUNTIME")
+          xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p shots
+          for s in menu animation alert paste list sheet focus dense dup fullscreen nav; do
+            if [ "$s" = menu ]; then xcrun simctl launch "$UDID" nz.zheha.poki.gym > /dev/null
+            else xcrun simctl openurl "$UDID" "pokigym://$s"; fi
+            sleep 2
+            xcrun simctl io "$UDID" screenshot "shots/$s.png" > /dev/null
+            xcrun simctl spawn "$UDID" launchctl list | grep -q 'nz.zheha.poki.gym' || { echo "::error::Poki Gym died on $s"; exit 1; }
+          done
+          ls shots
+      - uses: actions/upload-artifact@v4
+        with: { name: PokiGym-simulator, path: PokiGym.app.zip }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: gym-shots, path: shots }
