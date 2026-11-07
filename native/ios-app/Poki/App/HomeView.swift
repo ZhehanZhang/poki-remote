@@ -291,6 +291,10 @@ struct Issue: Identifiable {
                 out.append(Issue(id: "passcode", symbol: "lock.open.fill", title: "Enter the passcode if the iPhone asks",
                                  text: "iOS asks for the passcode before UI Automation after Poki Runner was force-closed or the iPhone restarted. Enter it once; Poki carries on by itself.", fix: .none))
             }
+            if let text = model.handoffText {
+                out.append(Issue(id: "handoff", symbol: "person.fill", title: "Your turn",
+                                 text: "\(text). The agent waits and sends nothing until you tap Done on the Live Activity.", fix: .none))
+            }
             if case .offline = model.relayStatus {
                 out.append(Issue(id: "relay", symbol: "wifi.exclamationmark", title: "Agents can't reach this iPhone",
                                  text: "Poki is offline. Check that the phone has internet; Poki reconnects by itself.", fix: .none))

@@ -11,6 +11,10 @@ enum ShellEvent: Sendable {
     case toolFinished(summary: String, delivery: String, app: String?, thumbnail: Data?)
     case approvalRequested(PendingApproval)
     case approvalEnded(id: String, approved: Bool?)
+    /// The model handed a screen to the owner (a passcode, a password, a verification, a payment, other).
+    case handoffRequested(id: String, kind: String, text: String?, app: String?)
+    /// `how` is "done" (the owner tapped Done) or "takenBack" (the model went on by itself).
+    case handoffEnded(id: String, how: String)
 }
 
 enum RelayStatus: Sendable, Equatable {

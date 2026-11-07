@@ -46,6 +46,8 @@ final class AppModel {
     private(set) var pairingVerifiedAt: Date?
     /// The runner has been launching for a while: iOS may be asking for the passcode.
     private(set) var passcodeHint = false
+    /// The hand-off the agent asked the owner for, while it waits (shown on the home screen too).
+    private(set) var handoffText: String?
     private var launchingSince: Date?
     private var endCheck = 0
     private var lastAgentActivity = Date()
@@ -398,6 +400,28 @@ final class AppModel {
             activity.update { state in
                 if state.approval?.id == id { state.approval = nil; state.phase = .working; state.headline = approved == true ? "Approved. Continuing" : "Not allowed" }
             }
+        case .handoffRequested(let id, let kind, let text, let app):
+            lastAgentActivity = Date()
+            let shown = PokiActivityAttributes.ContentState.Handoff.Kind(rawValue: kind) ?? .other
+            handoffText = text ?? Self.handoffWording(shown)
+            log.add("handoff", "the agent handed over \(id) (\(kind))\(app.map { " in \($0)" } ?? ""): \(handoffText ?? "")")
+            activity.update { state in
+                state.phase = .handoff
+                state.handoff = .init(id: id, kind: shown, text: text, app: app, since: Date())
+                state.headline = "Your turn"
+                state.app = app ?? state.app
+            }
+        case .handoffEnded(let id, let how):
+            lastAgentActivity = Date()
+            log.add("handoff", "ended \(id): \(how)")
+            handoffText = nil
+            activity.update { state in
+                if state.handoff?.id == id {
+                    state.handoff = nil
+                    state.phase = .working
+                    state.headline = how == "done" ? "Carrying on" : "The agent carried on by itself"
+                }
+            }
         }
     }
 
@@ -441,6 +465,18 @@ final class AppModel {
         }
     }
     static let runnerPasscodeHandoff = "runner-passcode"
+
+    /// What the owner is asked to do, when the model gave no words of its own.
+    static func handoffWording(_ kind: PokiActivityAttributes.ContentState.Handoff.Kind) -> String {
+        switch kind {
+        case .runnerPasscode: "The phone asks for your passcode so the runner can start"
+        case .passcode: "The screen asks for your passcode"
+        case .password: "The screen asks for a password"
+        case .verification: "The screen asks for a verification step"
+        case .payment: "The screen asks you to confirm a payment"
+        case .other: "The agent cannot act on this screen; please do this step"
+        }
+    }
 
     /// A decision from the Live Activity. Allow is tapped on the expanded Dynamic Island, which takes
     /// about a second to collapse; input sent at once can land on it (iOS then opens Poki). So the

@@ -28,10 +28,8 @@ final class LiveCore: CoreSession {
     func start() { core.start() }
     func stop() { core.stop(); continuation.yield(.relay(.off)) }
     func resolveApproval(id: String, approved: Bool) { core.resolveApproval(id: id, approved: approved) }
-    /// The person finished a handed-off screen. PokiCore's side (the do action {"handoff": ...},
-    /// CoreEvent.handoffRequested/handoffEnded, PokiCore.handoffDone(id:)) is being built on
-    /// dev/ios-core; until it lands the id is only logged.
-    func handoffDone(id: String) { AppLog.shared.add("handoff", "PokiCore told: done \(id)") }
+    /// The person finished a handed-off screen (Done on the Live Activity): PokiCore lets inputs through again.
+    func handoffDone(id: String) { core.handoffDone(id: id) }
     func accessChanged() { core.accessChanged() }
 
     private static func map(_ event: CoreEvent) -> ShellEvent {
@@ -47,6 +45,8 @@ final class LiveCore: CoreSession {
         case .approvalRequested(let approval):
             return .approvalRequested(PendingApproval(id: approval.id, app: approval.app, summary: approval.summary, expires: approval.expires))
         case .approvalEnded(let id, let approved): return .approvalEnded(id: id, approved: approved)
+        case .handoffRequested(let id, let kind, let text, let app): return .handoffRequested(id: id, kind: kind, text: text, app: app)
+        case .handoffEnded(let id, let how): return .handoffEnded(id: id, how: how)
         }
     }
 }
