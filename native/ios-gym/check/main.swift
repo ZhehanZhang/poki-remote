@@ -162,7 +162,7 @@ func ref(in answer: String, _ text: String, type: String? = nil, last: Bool = fa
     guard let r = ref(in: answer, text, type: type, last: last) else {
         check(false, "\"\(text)\" is listed in the tree"); return answer
     }
-    var answer = await call("tap \(text)", "do", ["actions": .array([["tap": .number(Double(r))]] + then)])
+    answer = await call("tap \(text)", "do", ["actions": .array([["tap": .number(Double(r))]] + then)])
     if !answer.contains(state) { answer = await call("look after tap \(text)", "look") }
     check(answer.contains(state), "tapping \"\(text)\" gives state \"\(state)\"")
     return answer
