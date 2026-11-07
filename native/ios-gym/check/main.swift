@@ -238,7 +238,7 @@ if let cont = ref(in: intro, "Continue", type: "Button") {
 // 4. A long list: scroll_to by text, then tap.
 a = await open("list")
 let found = await scrollTo("Row 250", step: "scroll_to Row 250")
-check(found.contains("found at") || found.contains("Row 250"), "scroll_to finds Row 250")
+check(found.contains("found at") || found.contains("found by scroll_to"), "scroll_to finds Row 250")
 a = found.contains("Row 250") ? found : await call("look for Row 250", "look")
 a = await tap("Row 250", in: a, expect: "Row 250 tapped")
 let missing = await call("scroll_to a row that does not exist", "do", ["actions": [["scroll_to": ["text": "Row 9999", "max_swipes": 2]]]], budget: 30)
