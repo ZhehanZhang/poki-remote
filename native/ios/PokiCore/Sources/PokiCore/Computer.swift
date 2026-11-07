@@ -226,7 +226,7 @@ final class Computer: @unchecked Sendable {
                 : "elements (\(shown.count) on screen; only the changed are listed: + new, ~ moved; the \(same) others keep their numbers, full=true lists all):"
             body = changed.prefix(Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
         } else {
-            heading = fresh || prior.isEmpty ? "elements (\(shown.count)):" : "elements (\(shown.count); + new since the last read, ~ moved):"
+            heading = prior.isEmpty ? "elements (\(shown.count)):" : fresh ? "elements (\(shown.count); a new screen: numbered from 1 again, the numbers of the read before no longer apply):" : "elements (\(shown.count); + new since the last read, ~ moved):"
             body = shown.indices.prefix(full ? 1000 : Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
             if !full, shown.count > Self.lineLimit { body.append("… \(shown.count - Self.lineLimit) more; full=true lists all") }
         }
@@ -423,6 +423,7 @@ final class Computer: @unchecked Sendable {
                 break
             }
             let began = now()
+            let givenUp = runner.actionsGivenUp.value
             do {
                 let (kind, text) = try await withDeadline(left, "action \(index + 1)") { [self] in try await perform(action, until: actionsUntil) }
                 lastKind = kind
@@ -437,7 +438,7 @@ final class Computer: @unchecked Sendable {
                 switch failure {
                 case let e as ActionFailure: delivery = e.delivery
                 case let e as RunnerError: delivery = e.delivery
-                case is DeadlineExceeded where !runner.hasSession:
+                case is DeadlineExceeded where !runner.hasSession && runner.actionsGivenUp.value == givenUp:
                     // The time ran out while a session was still being opened: nothing reached the phone.
                     delivery = .notSent
                     why += runner.busyWith.map { "; the runner is still finishing an earlier \($0)" } ?? "; no session was open yet"

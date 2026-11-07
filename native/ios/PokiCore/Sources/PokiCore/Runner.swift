@@ -88,6 +88,9 @@ public final class Runner: @unchecked Sendable {
     /// ending a session) one after another on its main thread, so until that one is done the runner
     /// is busy, whatever is sent to it.
     private let stall = LockedBox<(path: String, since: Double)?>(nil)
+    /// How many actions this side has given up on (sent, and not answered in time). A call compares
+    /// it before and after an action to tell a timeout that reached the runner from one that did not.
+    let actionsGivenUp = LockedBox(0)
     /// What the runner is still finishing, if anything: "GET /source, 7 s ago".
     public var busyWith: String? { stall.value.map { "\($0.path) from \(Int((now() - $0.since).rounded())) s ago" } }
     /// Requests WDA answers apart from its queue (FBRoute `.standalone`).
@@ -111,7 +114,11 @@ public final class Runner: @unchecked Sendable {
     /// read of an app that never goes idle (a looping animation over the keyboard on the simulator)
     /// blocks WDA's main thread, and with it every request behind it, screenshots and Home included,
     /// for half a minute.
-    static let sessionSettings: JSON = ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": 2]
+    /// WDA decides which app is "active" by the app that owns one screen point, by default 20 % in
+    /// from the top left, where a notification banner lies (seen on the phone: a Bedtime banner made
+    /// a read answer SpringBoard's tree with no app). The centre of the screen belongs to the app,
+    /// and to a system alert (a paste or permission prompt) when one is up, so the tree shows it.
+    static let sessionSettings: JSON = ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": 2, "activeAppDetectionPoint": "200,420"]
 
     /// One request outside the session. `countsAsMiss: false` for a request that may rightly take long
     /// (a gesture): its timeout is not taken as a sign that the runner is gone.
@@ -130,13 +137,16 @@ public final class Runner: @unchecked Sendable {
             throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted", delivery: .notSent, silent: true)
         } catch let error as DeadlineExceeded {
             if countsAsMiss { miss(timedOut: true) }
-            if queued { abandon(method, path) }
+            if queued { abandon(method, path, endSession: method != "GET") }
             throw RunnerError(message: error.description + busyNote(), delivery: .unknown, silent: true)
         } catch TransportError.timedOut {
             if countsAsMiss { miss(timedOut: true) }
-            if queued { abandon(method, path) }
+            if queued { abandon(method, path, endSession: method != "GET") }
             throw RunnerError(message: "the runner did not answer \(method) \(Self.short(path)) within \(DeadlineExceeded.format(timeout))" + busyNote(), delivery: .unknown, silent: true)
         } catch is CancellationError {
+            // The call's own time ran out around this request (an action's cap): this side gave up on
+            // it just as on a timeout, so what is queued behind it must not run late.
+            if queued { abandon(method, path, endSession: method != "GET") }
             throw CancellationError()
         } catch {
             miss()
@@ -164,9 +174,14 @@ public final class Runner: @unchecked Sendable {
     /// it with "session does not exist" and does not run them, and the request it is serving is the
     /// last thing it does for that session. The next call opens a new session, which waits its turn
     /// behind that request and is answered as busy when its turn does not come in time.
-    private func abandon(_ method: String, _ path: String) {
+    /// A read (GET) that times out keeps the session: nothing queued behind it can act, and ending
+    /// the session would only put the next session open behind the same slow read (seen on the
+    /// phone: every look in WeChat opened a session that queued behind the read before it). An
+    /// action or a session open that times out ends the session, so nothing runs late.
+    private func abandon(_ method: String, _ path: String, endSession: Bool = true) {
         stall.update { if $0 == nil { $0 = ("\(method) \(Self.short(path))", now()) } }
-        guard let id = state.value.session, path.hasPrefix("/session/\(id)") else { return }
+        guard endSession, let id = state.value.session, path.hasPrefix("/session/\(id)") else { return }
+        actionsGivenUp.update { $0 += 1 }
         forgetSession()
         Task { [transport, url] in
             _ = try? await withDeadline(2.5, "ending the session") {

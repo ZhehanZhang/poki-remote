@@ -66,6 +66,10 @@ final class RelayClient: @unchecked Sendable {
     let factory: WebSocketFactory
     let handler: @Sendable (RelayRequest) async -> RelayResponse
     let emit: @Sendable (RelayState) -> Void
+    /// An answer that was ready after its connection had dropped: the handler finished, the relay
+    /// had already failed the caller, and the answer would be lost (seen on the phone: a three-action
+    /// do answered "what was sent is unknown" when the relay reset mid-call).
+    var undelivered: (@Sendable (RelayRequest, RelayResponse) -> Void)?
     var pingEvery = 25.0
     var silentLimit = 60.0
     var maxBackoff = 30.0
@@ -148,13 +152,12 @@ final class RelayClient: @unchecked Sendable {
         let socket = try await withDeadline(15, "connecting to the relay") { [factory] in try await factory.connect(to: url) }
         state.update { $0.socket = socket; $0.lastHeard = now() }
         defer {
-            let inflight = state.update { s -> [Task<Void, Never>] in
-                let r = Array(s.inflight.values)
+            // The calls in flight go on to their end: what they did on the phone is reported through
+            // `undelivered` with the next call, instead of being cut short with the connection.
+            state.update { s in
                 s.inflight = [:]
                 if s.socket as AnyObject === socket as AnyObject { s.socket = nil }
-                return r
             }
-            inflight.forEach { $0.cancel() }
             socket.close(code: 1000, reason: "")
         }
 
@@ -197,7 +200,8 @@ final class RelayClient: @unchecked Sendable {
                     guard let self else { return }
                     let response = await self.handler(request)
                     let stillWanted = self.state.update { $0.inflight.removeValue(forKey: id) != nil }
-                    guard stillWanted, !Task.isCancelled else { return }
+                    guard !Task.isCancelled else { return }
+                    guard stillWanted else { self.undelivered?(request, response); return }
                     try? await socket.send(self.frame(for: response).serialized())
                 }
                 state.update { $0.inflight[id] = task }

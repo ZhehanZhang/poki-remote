@@ -167,6 +167,7 @@ public final class PokiCore: @unchecked Sendable {
         let client = RelayClient(baseURL: config.relayURL, host: host, factory: socketFactory, handler: { [weak self] request in
             await self?.handle(request) ?? RelayResponse(id: request.id, status: 503, headers: [:], body: "")
         }, emit: { [weak self] in self?.emit(.relay($0)) })
+        client.undelivered = { [weak self] request, response in self?.keepLost(request, response) }
         relay = client
         client.start()
     }
@@ -175,6 +176,16 @@ public final class PokiCore: @unchecked Sendable {
         relay?.stop()
         relay = nil
     }
+
+    /// Answers whose connection dropped before they could be sent; the next call carries them.
+    let lost = LockedBox<[String]>([])
+    func keepLost(_ request: RelayRequest, _ response: RelayResponse) {
+        guard let body = try? JSON.parse(response.body), let text = body["result"]?["content"]?[0]?["text"]?.string else { return }
+        let name = (try? JSON.parse(request.body))?["params"]?["name"]?.string ?? "call"
+        let stamp = clock.string(from: Date())
+        lost.update { $0 = Array(($0 + ["the \(name) call whose connection dropped (finished at \(stamp)): " + text]).suffix(3)) }
+    }
+    private let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
 
     /// The connector secrets changed: tell the relay the new list.
     public func accessChanged() { relay?.sendAccess() }
@@ -280,7 +291,7 @@ public final class PokiCore: @unchecked Sendable {
         // The owner's time on an approval comes on top of the tool's own time.
         // The owner's time on an approval, and the runner's start, come on top of the tool's own time.
         let deadline = config.toolDeadline + (name == "do" ? config.approvalWait : 0) + config.runnerWait + 1
-        let output: ToolResult
+        var output: ToolResult
         do {
             output = try await withDeadline(deadline, name) { [computer] in
                 name == "look" ? await computer.look(full: args["full"]?.bool ?? false) : await computer.act(actions: args["actions"]?.array ?? [], full: args["full"]?.bool ?? false)
@@ -291,6 +302,10 @@ public final class PokiCore: @unchecked Sendable {
         }
         gate.current = nil
         gate.leave()
+        let earlier = lost.update { l -> [String] in defer { l = [] }; return l }
+        if !earlier.isEmpty {
+            output.text = "earlier, never delivered to you: " + earlier.joined(separator: "\n\n") + "\n\nnow:\n" + output.text
+        }
         let line = output.text.split(separator: "\n").first.map(String.init) ?? ""
         let thumbnail = computer.lastPNG.flatMap { try? host?.jpeg(fromPNG: $0, width: 96, quality: 0.5) }
         emit(.toolFinished(activity, output.isError ? .failed(line) : .done(line), ToolFacts(app: computer.lastForeground?.describe, thumbnail: thumbnail)))
