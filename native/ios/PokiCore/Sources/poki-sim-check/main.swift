@@ -157,11 +157,10 @@ if let searchRef, let fieldRef = Int(searchRef) {
     if typed.contains("nothing was typed") {
         // As an agent would: the field's number from the latest read (the refused call's read may
         // have failed; then the numbers before it stand), else from a fresh look.
-        var again = ref(in: typed, "SearchField")
-        if again == nil, typed.contains("keep their numbers") { again = fieldRef }
-        if again == nil { again = ref(in: await call("look for the search field again", "look"), "SearchField") ?? fieldRef }
-        let again = again!
-        typed = await call("type again (the runner was busy)", "do", ["actions": [["type": .string(text), "ref": .number(Double(again))]]])
+        var fieldAgain = ref(in: typed, "SearchField")
+        if fieldAgain == nil, typed.contains("keep their numbers") { fieldAgain = fieldRef }
+        if fieldAgain == nil { fieldAgain = ref(in: await call("look for the search field again", "look"), "SearchField") }
+        typed = await call("type again (the runner was busy)", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldAgain ?? fieldRef))]]])
     }
     // The read-back can miss its time while the keyboard comes up; the next read shows the field then.
     // Simulator tolerance: on a fresh simulator Settings' own main loop can stop answering for a while
