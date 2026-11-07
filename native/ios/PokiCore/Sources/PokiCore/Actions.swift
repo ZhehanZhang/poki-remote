@@ -502,10 +502,13 @@ extension Computer {
             // queue behind it and time out, and the whole scroll would come back unknown (seen in
             // the gym on 300 rows): the runner is waited for, and a swipe the runner did not confirm
             // ends the scroll with its progress, never with an unknown.
+            // The wait and the read after a swipe get the scroll's time (reads take 1-4 s on a loaded
+            // simulator; one swipe per call with 7 s unused was seen in the gym), ending early only
+            // when the time is near.
             var waited = false
             if runner.busyWith != nil {
                 waited = true
-                guard await runner.waitUntilFree(timeout: Swift.max(0.3, Swift.min(2, until - now() - 1.6))) else {
+                guard await runner.waitUntilFree(timeout: Swift.max(0.3, until - now() - 1.6)) else {
                     return notYet("the runner is still finishing the read after the last swipe")
                 }
             }
@@ -516,7 +519,7 @@ extension Computer {
             }
             swipes += 1
             await sleep(seconds: 0.1)
-            guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { last = nil; still = 0; continue }
+            guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(config.readTimeout, until - now() - 1.3)), format: config.treeFormat) else { last = nil; still = 0; continue }
             let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
             if signature == last, !waited {
                 // The end is declared only when two swipes in a row, each sent to a free runner and

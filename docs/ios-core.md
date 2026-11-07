@@ -412,6 +412,11 @@ Each answer is facts only: the app in front, numbered elements, what each action
   finds it and gives its number: the read after a scroll_to ends with "found by scroll_to: 1506
   Button "Found" [165,774,72,35] (tap 1506)", whether or not the listing reached it (the gym's
   1,507-element grid had its state button at 1506).
+- **A scroll spends its time on the list, not on round trips.** Inside `scroll_to` the wait for a
+  runner still serving the read after the last swipe, and that read itself, get the scroll's
+  remaining time (reads take 1-4 s on a loaded simulator); the scroll ends early only when under
+  1.6 s is left. The host's own screenshot path gets the call's remaining time (up to 10 s), not a
+  fixed 6 s (simctl took 6.4 s on a loaded CI runner).
 - **A scroll declares the end only after two confirmed unmoved swipes.** `scroll_to` ends with
   "the list stopped moving" only when two swipes in a row, each sent to a free runner and read
   after, left the list as it was. A swipe sent right after a wait for a busy runner does not count:
