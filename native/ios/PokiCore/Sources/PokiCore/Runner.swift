@@ -182,8 +182,8 @@ public final class Runner: @unchecked Sendable {
     /// for them (the soak: an open that hung held a look 3 s past its read, up to the backstop).
     func useLimits(_ wanted: SnapshotLimits) async {
         guard wanted != limits.value else { return }
-        guard hasSession, busyWith == nil else { limits.value = wanted; return }
-        guard let id = try? await session(timeout: 2) else { return }
+        guard hasSession else { limits.value = wanted; return }  // the open sends them
+        guard busyWith == nil, let id = try? await session(timeout: 2) else { return }  // a busy runner keeps what it has
         if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted.depth)), "snapshotMaxChildren": .number(Double(wanted.children))]], timeout: 2, countsAsMiss: false)) != nil {
             limits.value = wanted
         }

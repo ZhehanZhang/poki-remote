@@ -25,6 +25,27 @@ final class Host: CoreHost, @unchecked Sendable {
     }
     func runnerState() -> RunnerState { .running }
     func restartRunner() {}
+    /// The simulator's own screenshot, apart from WDA (what the Poki app does with the phone's
+    /// screenshot service): `simctl io booted screenshot`, a few hundred ms, over 2 s on a loaded runner.
+    func screenshotWithoutRunner() async -> Data? {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("poki-sim-check-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: path) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "io", "booted", "screenshot", "--type=png", path.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let began = Date()
+        do {
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+                process.terminationHandler = { _ in done.resume() }
+                do { try process.run() } catch { done.resume(throwing: error) }
+            }
+        } catch { return nil }
+        let data = try? Data(contentsOf: path)
+        print("host: simctl screenshot \(data.map { "\($0.count / 1024) KB" } ?? "none") in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
+        return data
+    }
 }
 
 let url = URL(string: ProcessInfo.processInfo.environment["POKI_WDA_URL"] ?? "http://127.0.0.1:8100")!
@@ -134,7 +155,12 @@ if let searchRef, let fieldRef = Int(searchRef) {
     // Nothing typed because the runner was still busy (the keyboard's first use on a fresh simulator
     // held it for seconds): sent again, as an agent would, once.
     if typed.contains("nothing was typed") {
-        typed = await call("type again (the runner was busy)", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldRef))]]])
+        // As an agent would: the field's number from the latest read (the refused call's read may
+        // have failed; then the numbers before it stand), else from a fresh look.
+        var fieldAgain = ref(in: typed, "SearchField")
+        if fieldAgain == nil, typed.contains("keep their numbers") { fieldAgain = fieldRef }
+        if fieldAgain == nil { fieldAgain = ref(in: await call("look for the search field again", "look"), "SearchField") }
+        typed = await call("type again (the runner was busy)", "do", ["actions": [["type": .string(text), "ref": .number(Double(fieldAgain ?? fieldRef))]]])
     }
     // The read-back can miss its time while the keyboard comes up; the next read shows the field then.
     // Simulator tolerance: on a fresh simulator Settings' own main loop can stop answering for a while

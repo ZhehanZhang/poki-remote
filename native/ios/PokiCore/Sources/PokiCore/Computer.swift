@@ -36,11 +36,18 @@ final class Computer: @unchecked Sendable {
     var lastAll: [Element] = []
     /// When the latest tree was read (a `wait_until: settled` takes a fresh one as its first sample).
     var lastTreeAt: Double?
+    /// A swipe or drag went out that no tree read has shown yet: `scroll_to` reads before it swipes
+    /// again, so a target cannot pass between two reads (the gym's row 250, scrolled past unread).
+    var swipeUnread = false
     var lastForeground: Foreground?
     var size: ScreenSize?
     var lastPNG: Data?
     var lastTree: String?
     var lastPicture: PictureSketch?
+
+    /// The element the last scroll_to found, so the read after it can give its number (it may be
+    /// past the listing's limit: the gym's 1,507-element grid had its button at 1506).
+    var scrollFound: Element?
 
     var lastElements: [Element] { listed.map(\.element) }
     var layout: Layout { Layout(all: lastAll, screen: size ?? ScreenSize(width: 10_000, height: 10_000)) }
@@ -77,7 +84,7 @@ final class Computer: @unchecked Sendable {
     /// only what changed since the read before (a `do`); `full` lists every element, as the tree has it.
     func readAndReply(until: Double, full: Bool, changes: Bool = false, did: [String] = [], error: String? = nil, extra: [String] = []) async -> ToolResult {
         let budget = max(0.8, min(config.readTimeout, until - now() - 0.2))
-        let reading = await runner.read(timeout: budget, extra: max(0, min(4, until - now() - budget - 3)), format: config.treeFormat)
+        let reading = await runner.read(timeout: budget, extra: max(0, min(4, until - now() - budget - 3)), format: config.treeFormat, callEnds: until)
         if size == nil { _ = try? await screenSize(until: now() + 1.5) }
         let screen = size ?? ScreenSize(width: 10_000, height: 10_000)
         var notes = reading.notes
@@ -85,9 +92,11 @@ final class Computer: @unchecked Sendable {
             // Nothing came back: say what was sent and what the runner is doing, and nothing else.
             let state = host.runnerState()
             let did = did.map { $0.replacingOccurrences(of: "(sent,", with: "(sent, not confirmed: no read after it,") }
-            let lines = ["read: failed (\(notes.joined(separator: "; ")))", "runner: \(state.describe)"] + did.map { "did: \($0)" } + (error.map { ["error: \($0)"] } ?? []) + extra
-            refs = [:]
-            listed = []
+            // The numbers of the read before stand: nothing newer was read, and the model can act on
+            // them or send the same action again (CI simulator: a type sent again after "nothing was
+            // typed" was refused as stale because the refused call's read had failed).
+            let kept = refs.isEmpty ? [] : ["the elements of the read before keep their numbers (nothing newer was read)"]
+            let lines = ["read: failed (\(notes.joined(separator: "; ")))", "runner: \(state.describe)"] + did.map { "did: \($0)" } + (error.map { ["error: \($0)"] } ?? []) + extra + kept
             return ToolResult(text: lines.joined(separator: "\n"), jpeg: nil, isError: true)
         }
         let treeRead = !reading.elements.isEmpty || reading.notes.isEmpty
@@ -210,6 +219,10 @@ final class Computer: @unchecked Sendable {
             }
             lastAll = reading.elements
             lastTreeAt = now()
+            swipeUnread = false
+        } else if shown.isEmpty, !refs.isEmpty {
+            // A picture but no tree and no text read from it: the numbers of the read before stand.
+            notes.append("the elements of the read before keep their numbers (nothing newer was read)")
         } else {
             refs = [:]
             listed = []
@@ -238,8 +251,23 @@ final class Computer: @unchecked Sendable {
             body = changed.prefix(Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
         } else {
             heading = prior.isEmpty ? "elements (\(shown.count)):" : fresh ? "elements (\(shown.count); a new screen: numbered from 1 again, the numbers of the read before no longer apply):" : "elements (\(shown.count); + new since the last read, ~ moved):"
-            body = shown.indices.prefix(full ? 1000 : Self.lineLimit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
-            if !full, shown.count > Self.lineLimit { body.append("… \(shown.count - Self.lineLimit) more; full=true lists all") }
+            let limit = full ? 1000 : Self.lineLimit
+            body = shown.indices.prefix(limit).map { line(assigned[$0]!, shown[$0], marks[$0]) }
+            if shown.count > limit {
+                // What was left out, by type, so the model knows what it cannot see (the gym's grid
+                // put the state button past the limit) and that scroll_to by text numbers any of them.
+                var byType: [String: Int] = [:]
+                for e in shown[limit...] { byType[e.type, default: 0] += 1 }
+                let types = byType.sorted { $0.value > $1.value }.prefix(6).map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+                body.append("… \(shown.count - limit) more not listed (\(types)); \(full ? "" : "full=true lists up to 1000; ")scroll_to with an element's text finds it and gives its number")
+            }
+        }
+        if let wanted = scrollFound {
+            // The element scroll_to found, with its number, listed whether or not the listing reached it.
+            scrollFound = nil
+            if let i = shown.firstIndex(where: { $0.key == wanted.key && $0.frame.described == wanted.frame.described }) ?? shown.firstIndex(where: { $0.key == wanted.key }) {
+                body.append("found by scroll_to: \(line(assigned[i]!, shown[i], " ").trimmingCharacters(in: .whitespaces)) (tap \(assigned[i]!))")
+            }
         }
         if pictureOnly { heading = "elements (\(shown.count), read from the picture because the element tree did not come in time; a number taps the text's centre):" }
         if !collapsed.isEmpty, !full { heading += "  ([collapsed] = one element whose parts are not in the tree; full=true adds the text read from the picture inside it, or tap a point on the screenshot)" }
@@ -362,6 +390,7 @@ final class Computer: @unchecked Sendable {
     }
 
     func actNow(actions: [JSON], full: Bool) async -> ToolResult {
+        scrollFound = nil
         var started = now()
         var until = started + config.toolDeadline
         if let blocked = await waitForRunner(until: until) { return blocked }
@@ -501,7 +530,8 @@ final class Computer: @unchecked Sendable {
         for (i, action) in actions.enumerated() {
             let index = offset + i
             // A launch gets 9 s; a fresh one (the app ended first, up to 6 s on its own) 14 s.
-            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : action["scroll_to"] != nil ? max(config.actionCap, Self.scrollCap) : config.actionCap
+            // A type is a tap, a wait for the focus and the keys (and a wait for a busy runner): 9 s.
+            let cap = action["launch"] != nil ? max(config.actionCap, action["launch"]?["fresh"]?.bool == true ? 14 : 9) : action["scroll_to"] != nil ? max(config.actionCap, Self.scrollCap) : action["type"] != nil ? max(config.actionCap, 9) : config.actionCap
             let actionsUntil = min(until - config.readTimeout - 0.5, now() + cap)
             let left = actionsUntil - now()
             if left < 0.3 {

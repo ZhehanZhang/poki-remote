@@ -429,6 +429,58 @@ final class FaultTests: XCTestCase {
         XCTAssertFalse(look.text.hasPrefix("error:"), look.text)
     }
 
+    /// The gym's 1,507-element grid: the button after the grid was element 1506, past the 1,000
+    /// lines full=true lists, so the agent could not tap it by number. A cut listing says what was
+    /// left out by type, and scroll_to's answer gives the found element's number.
+    func testACutListingSaysWhatWasLeftOutAndScrollToGivesTheNumber() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 20 }
+        let cells = (0..<1_100).map { i in Node("Cell", "Tile \(i)", [Double(i % 10) * 39, 100 + Double(i / 10) * 0.6, 39, 1]) }
+        wda.tree([Node("Other", "Grid", [0, 100, 390, 660], cells), Node("Button", "Found", [165, 774, 72, 35])], app: "Gym")
+        let look = await core.call("look", ["full": true])
+        XCTAssertTrue(look.text.contains("more not listed (Cell "), look.text)
+        XCTAssertTrue(look.text.contains("scroll_to with an element's text finds it and gives its number"), look.text)
+        XCTAssertFalse(look.text.contains("Button \"Found\""), "the button is past the listing limit: \(look.text.suffix(300))")
+        let scroll = await core.call("do", ["actions": [["scroll_to": "Found"]]])
+        XCTAssertTrue(scroll.text.contains("0 swipes, found at [165,774,72,35]"), scroll.text)
+        guard let line = scroll.text.split(separator: "\n").first(where: { $0.hasPrefix("found by scroll_to:") }) else { return XCTFail(scroll.text) }
+        XCTAssertTrue(line.contains("Button \"Found\" [165,774,72,35] (tap "), String(line))
+        let number = Int(line.split(separator: " ")[3]) ?? 0
+        XCTAssertGreaterThan(number, 1000, String(line))
+        let tap = await core.call("do", ["actions": [["tap": .number(Double(number))]]])
+        XCTAssertTrue(tap.text.contains("did: tap tap \"Found\" (sent,"), tap.text)
+    }
+
+    /// The gym's 300 rows: a swipe sent right after a wait for a busy runner did not move the list
+    /// (the app's main loop was serving the snapshot), the next read matched the one before, and
+    /// scroll_to declared the end at row 180. Now the end takes two unmoved swipes in a row, each
+    /// sent to a free runner; one after a wait does not count.
+    func testScrollToDeclaresTheEndOnlyAfterTwoConfirmedUnmovedSwipes() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 20 }
+        _ = await core.call("look", [:])
+        wda.source((0..<10).map { ("Cell", "Row \($0)") })
+        let result = await core.call("do", ["actions": [["scroll_to": "Nope"]]])
+        XCTAssertTrue(result.text.contains("3 swipes, \"Nope\" not found: the list stopped moving"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/pressAndDragWithVelocity").count, 3)
+    }
+
+    /// CI simulator (ios-core run 52): a type was refused while the runner was busy, that call's
+    /// read failed, and the type sent again with the same number was refused as stale. When nothing
+    /// newer was read, the numbers of the read before stand.
+    func testTheNumbersStandWhenNothingNewerWasRead() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 0.5; $0.toolDeadline = 4 }
+        let look = await core.call("look", [:])
+        XCTAssertTrue(look.text.contains("1 Button"), look.text)
+        wda.delay("GET /source", 5)
+        wda.delay("GET /screenshot", 5)
+        let failed = await core.call("look", [:])
+        XCTAssertTrue(failed.text.contains("the elements of the read before keep their numbers (nothing newer was read)"), failed.text)
+        wda.source([("Button", "General"), ("Button", "Privacy")])
+        wda.set("GET /screenshot") { _ in (200, ["value": .string(Data("png".utf8).base64EncodedString())]) }
+        let tap = await core.call("do", ["actions": [["tap": 1]]])
+        XCTAssertFalse(tap.text.contains("is not in the latest read"), tap.text)
+        XCTAssertTrue(tap.text.contains("did: tap tap \"General\" (sent,"), tap.text)
+    }
+
     /// CI simulator (ios-core run 48): a read took 4.5 s, two did not fit the action's 6 s, and the
     /// wait ran out of its time as "unknown". The read before the call, when fresh, is the first
     /// sample; a wait never runs out as unknown (it sends nothing).
@@ -793,8 +845,9 @@ final class GymTests: XCTestCase {
         let stuck = await core.call("look", [:])
         XCTAssertTrue(stuck.text.contains("still finishing an earlier") && stuck.text.contains("restarted on its own if it is not through"), stuck.text)
         XCTAssertNotNil(core.runner.busyWith)
-        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted (within 8 s; a
+        // loaded CI runner is slower, and the stuck look above answers at once now).
+        for _ in 0..<80 where host.restarts.value == 0 { try? await Task.sleep(nanoseconds: 100_000_000) }
         XCTAssertEqual(host.restarts.value, 1, "the wedged runner was restarted")
         XCTAssertNil(core.runner.busyWith, "the stall went with the old runner")
         XCTAssertTrue(core.runner.lastRestart.value?.contains("wedged on ") ?? false, core.runner.lastRestart.value ?? "nil")
@@ -926,6 +979,7 @@ final class GymTests: XCTestCase {
         let started = Date()
         let result = await core.call("do", ["actions": [["scroll_to": "Row 45"]]])
         XCTAssertTrue(result.text.contains("scroll_to \"Row 45\": 4 swipes, found at [16,320,358,44]"), result.text)
+        XCTAssertTrue(result.text.contains("found by scroll_to:") && result.text.contains("Cell \"Row 45\" [16,320,358,44] (tap "), result.text)
         XCTAssertGreaterThan(Date().timeIntervalSince(started), 3.5, "four 1 s swipes outlast the 3 s action cap: scroll_to has 12 s")
         XCTAssertTrue(wda.bodies("POST /wda/pressAndDragWithVelocity").allSatisfy { $0["holdDuration"]?.double == 0.05 })
     }
@@ -955,6 +1009,49 @@ final class GymTests: XCTestCase {
         _ = await core.call("look", [:])
         let again = await core.call("do", ["actions": [["scroll_to": "Row 250"]]])
         XCTAssertTrue(again.text.contains("not_sent") || again.text.contains("still finishing"), again.text)
+    }
+
+    /// The gym's 300 rows again: seven scroll_to calls each swiped once, their reads after the swipe
+    /// never came, and row 250 was scrolled past unseen before the eighth call read rows 260-264,
+    /// so the scroll ran to the end and said not found. Now a swipe no read has shown is read
+    /// before anything is swiped again, in this call or the next, so a target cannot pass between
+    /// two reads however late they come.
+    func testScrollToReadsAnUnreadSwipeBeforeItSwipesAgain() async {
+        let (core, wda, _) = makeCore { $0.toolDeadline = 20; $0.readTimeout = 0.5 }
+        let slow = LockedBox(false), swipes = LockedBox(0), rows = LockedBox(0)
+        @Sendable func page(_ n: Int) -> JSON {
+            let children: [JSON] = (0..<10).map { i in
+                ["type": "XCUIElementTypeCell", "label": .string("Row \(n * 10 + i)"), "rect": ["x": 16, "y": .number(Double(100 + i * 44)), "width": 358, "height": 44]]
+            }
+            return ["value": ["type": "XCUIElementTypeApplication", "label": "Settings", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array(children)]]
+        }
+        wda.set("GET /source") { _ in
+            if slow.value { try await Task.sleep(nanoseconds: 5_000_000_000) }
+            return (200, page(rows.value))
+        }
+        wda.set("POST /wda/pressAndDragWithVelocity") { _ in
+            rows.value = swipes.update { $0 += 1; return $0 }
+            return (200, ["value": .null])
+        }
+        _ = await core.call("look", [:])
+        slow.value = true
+        let first = await core.call("do", ["actions": [["scroll_to": "Row 60"]]])
+        XCTAssertEqual(swipes.value, 1, first.text)
+        XCTAssertTrue(first.text.contains("1 swipes, \"Row 60\" not seen yet; the read after the last swipe did not come; nothing is swiped again until it has"), first.text)
+        XCTAssertTrue(first.text.contains("keep their numbers"), first.text)
+        // Still slow: the next call reads first and, with no read, swipes nothing.
+        let second = await core.call("do", ["actions": [["scroll_to": "Row 60"]]])
+        XCTAssertEqual(swipes.value, 1, "no swipe on top of an unread one: \(second.text)")
+        XCTAssertTrue(second.text.contains("0 swipes, \"Row 60\" not seen yet; the r"), second.text)
+        XCTAssertFalse(second.text.contains("(unknown"), second.text)
+        // Reads come again: the unread swipe's rows (10-19) are read before the swipes go on.
+        slow.value = false
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        let third = await core.call("do", ["actions": [["scroll_to": "Row 60"]]])
+        XCTAssertEqual(swipes.value, 6, third.text)
+        XCTAssertTrue(third.text.contains("5 swipes, found at [16,100,358,44]"), third.text)
+        XCTAssertTrue(third.text.contains("found by scroll_to:") && third.text.contains("Cell \"Row 60\""), third.text)
+        XCTAssertTrue(wda.sent.firstIndex(of: "GET /source").map { _ in true } ?? false)
     }
 
     /// CI simulator, the keyboard's first use: the runner stood still for seconds, the focus reads

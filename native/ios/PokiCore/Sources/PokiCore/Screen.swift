@@ -222,7 +222,7 @@ extension Runner {
     /// `extra`: time past `timeout` that a shallow re-read may take when the full-depth read timed
     /// out (seen in the gym: a 1,500-cell screen timed out twice at 4 s and answered nothing, while
     /// the depth-12 read after came in 0.2 s; a shallow tree now beats 4 s of nothing).
-    func read(timeout: Double, extra: Double = 0, wantPicture: Bool = true, format: String = "json") async -> Reading {
+    func read(timeout: Double, extra: Double = 0, wantPicture: Bool = true, format: String = "json", callEnds: Double? = nil) async -> Reading {
         let started = now()
         let pictureAt = LockedBox<Double?>(nil)
         // After a read that timed out, the next asks for half the tree's depth (a huge tree is what
@@ -291,14 +291,18 @@ extension Runner {
             // taken beside the first try did not: the runner gives it now (seen in the gym). Else
             // the host's own path, apart from the runner, with up to 6 s of its own (simctl on a CI
             // simulator took over 2 s).
-            if treeCame, let again = try? await screenshot(timeout: max(0.5, min(1.5, started + timeout + extra - now()))) {
+            let readLeft = started + timeout + extra - now()
+            if treeCame, readLeft > 0.4, let again = try? await screenshot(timeout: min(1.5, readLeft)) {
                 reading.png = again
                 reading.notes.append("the screenshot came on the second try (the first: \(e))")
             } else if let fallback = screenshotFallback {
                 // The answer says what became of the host's path, so a missing picture can be traced.
+                // The host's path gets the call's remaining time (up to 10 s; simctl took 6.4 s on a
+                // loaded CI runner), 6 s when the call's end is not known.
                 let began = now()
+                let hostTime = callEnds.map { Swift.max(1.5, Swift.min(10, $0 - now() - 0.5)) } ?? 6
                 let hostResult: Result<Data?, Error>
-                do { hostResult = .success(try await withDeadline(6, "the host's screenshot") { await fallback() }) } catch { hostResult = .failure(error) }
+                do { hostResult = .success(try await withDeadline(hostTime, "the host's screenshot") { await fallback() }) } catch { hostResult = .failure(error) }
                 switch hostResult {
                 case .success(let png?):
                     reading.png = png

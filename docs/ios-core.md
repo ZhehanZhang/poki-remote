@@ -406,6 +406,37 @@ Each answer is facts only: the app in front, numbered elements, what each action
   runner still busy is waited for within the action's time (3 s at most); when it is not through
   the answer is `not_sent … nothing was typed … send the type again`, so the text is never
   typed twice and never left in doubt.
+- **A cut listing says what it left out, and scroll_to gives the found element's number.** A
+  listing stops at 120 lines (1,000 with full=true); the line after it counts what was left out by
+  type ("… 507 more not listed (Cell 500, Button 7)") and says that scroll_to with an element's text
+  finds it and gives its number: the read after a scroll_to ends with "found by scroll_to: 1506
+  Button "Found" [165,774,72,35] (tap 1506)", whether or not the listing reached it (the gym's
+  1,507-element grid had its state button at 1506).
+- **A scroll spends its time on the list, not on round trips.** Inside `scroll_to` the wait for a
+  runner still serving the read after the last swipe, and that read itself, get the scroll's
+  remaining time (reads take 1-4 s on a loaded simulator); the scroll ends early only when under
+  1.6 s is left. The host's own screenshot path gets the call's remaining time (up to 10 s), not a
+  fixed 6 s (simctl took 6.4 s on a loaded CI runner).
+- **A scroll declares the end only after two confirmed unmoved swipes.** `scroll_to` ends with
+  "the list stopped moving" only when two swipes in a row, each sent to a free runner and read
+  after, left the list as it was. A swipe sent right after a wait for a busy runner does not count:
+  the app's main loop may still be serving the snapshot and drop the drag (the gym's 300 rows: a
+  false end at row 180). A read that fails between swipes starts the comparison over.
+- **A swipe is never sent on top of one no read has shown.** When a swipe went out (in this
+  `scroll_to` call or an earlier one, or a plain swipe or drag) and no tree read has come since,
+  the next `scroll_to` step is that read, not another swipe: `1 swipes, "Row 250" not seen yet; the
+  read after the last swipe did not come; nothing is swiped again until it has: call scroll_to
+  again`. Each swipe moves 70 % of the scroll area, so consecutive reads overlap and a target
+  cannot pass between them however late the reads come (the gym's 300 rows: seven calls each
+  swiped once with the read after it never landing, so rows 245-259 were never seen, and the
+  scroll ran to the end and said not found).
+- **Typing has 9 s and never leaves the keys in doubt.** A type is a tap, a wait for the focus and
+  the keys, plus a wait for a busy runner, so it has 9 s (the action cap otherwise). When under
+  1.2 s is left for the keys they are not sent: `nothing was typed … send the type again`.
+- **The numbers stand when nothing newer was read.** A call whose read failed (no tree, no picture)
+  says "the elements of the read before keep their numbers": the model can act on them or send the
+  same action again (the CI simulator: a type sent again after "nothing was typed" was refused as
+  stale because the refused call's read had failed).
 - **A scroll that outruns its time says how far it got.** `scroll_to` has 12 s (not an action's
   6 s: with the progress answer it cannot stall the model) and reads the tree after every swipe (a
   blind swipe can carry the target past the screen; an element search on the runner is a full
