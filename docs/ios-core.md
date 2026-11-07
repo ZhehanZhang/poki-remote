@@ -360,18 +360,27 @@ Each answer is facts only: the app in front, numbered elements, what each action
   gives no picture.
 - **A tree that times out is read again shallower within the same call.** A full-depth read that
   times out (4 s) is followed, once the runner is through with it (a queued probe answered), by a
-  read at half the depth (never under 12) within the call's remaining time: `the full tree timed
-  out (…), so it was read again to depth 25 within this call; deeper parts of nested elements may
-  be missing` (seen in the gym, Nov 7 2026 3:05 am ET: a 1,500-cell screen timed out twice and the
-  look answered nothing, 8-9 s per call, while the depth-12 read after it came in 0.2 s). The next
-  read starts at that depth and a fast read doubles it back toward 50.
+  read with smaller snapshot limits within the call's remaining time: first at most 150 children
+  per element (WDA's `snapshotMaxChildren`; a dense screen is wide, not deep: the gym's 1,500
+  cells are siblings, so depth alone did not help), then half the depth (never under 12) with half
+  the children (never under 60): `the full tree timed out (…), so it was read again with at most
+  150 children per element within this call; a long list shows its first 150 rows only (scroll_to
+  finds the rest)` (seen in the gym, Nov 7 2026 3:05 am ET: the 1,500-cell screen timed out twice
+  and the look answered nothing, 8-9 s per call). The next read starts at those limits and a fast
+  read doubles them back toward the full tree.
 - **A web view with nothing of its page in the tree is listed all the same.** WebKit's parts reach
   the tree late or not at all under a reduced depth (seen in the gym: three looks at a WKWebView
   listed the nav bar and nothing of the page). A WebView element is listed even with no text, as
-  `WebView "web page (its parts are not in the tree)" [collapsed]`, and the picture's text inside
-  it is listed in every look, not only `full=true`.
-- **A scroll that outruns the action's time says how far it got.** `scroll_to` needs about 2.5 s for
-  a swipe and the read after it; when less is left it stops where it is: `4 swipes, "Row 250" not
+  `WebView "web page (its parts are not in the tree yet: read again in a second)" [collapsed]`, and
+  the picture's text inside it is listed in every look, not only `full=true` (the gym showed the
+  parts arrive 3-4 s after the page loads).
+- **A scroll that outruns the action's time says how far it got.** Between swipes `scroll_to` asks
+  the runner for one element whose label or value holds the text (`POST /element`, a predicate: an
+  XCTest query, no tree serialised) and reads the tree once it is found; a runner without the
+  search falls back to a tree read per swipe (seen in the gym: a full read after every swipe cost
+  3 s per swipe, two swipes per action, and 300 rows were never reached). Up to 10 swipes per call
+  (`max_swipes` up to 12). A swipe with its search needs about 1.3 s; when less is left it stops
+  where it is: `4 swipes, "Row 250" not
   seen yet; the action's time ran out before the list was through (6 s): call scroll_to again to go
   on from here` (seen in the gym: 200 rows answered "(unknown) … may have been delivered"). A list
   that stops moving says "its end, or the text is not in it"; the swipe limit reached says to call

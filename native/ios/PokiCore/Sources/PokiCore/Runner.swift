@@ -70,6 +70,41 @@ public final class URLSessionTransport: HTTPTransport {
 
 /// The WebDriverAgent runner on the phone (W3C WebDriver plus WDA's extensions). Every request has its
 /// own timeout, and one session is kept and made again when WDA says it is gone.
+/// How much of the tree WDA snapshots: `depth` (WDA default 50) bounds nesting, `children` bounds
+/// the children of one element (a feed with hundreds of sibling cells is cut, not nesting). After a
+/// read that timed out the next read asks for less; a fast read asks for more again.
+struct SnapshotLimits: Equatable, Sendable {
+    var depth: Int
+    var children: Int
+    static let full = SnapshotLimits(depth: 50, children: 2_147_483_647)
+    static let fewestChildren = 60
+    var isFull: Bool { self == .full }
+    /// The next step down: the children first (siblings are what a dense screen has), then the depth.
+    var smaller: SnapshotLimits {
+        if children > 150 { return SnapshotLimits(depth: depth, children: 150) }
+        if depth > 12 { return SnapshotLimits(depth: max(12, depth / 2), children: max(Self.fewestChildren, children / 2)) }
+        return SnapshotLimits(depth: depth, children: max(Self.fewestChildren, children / 2))
+    }
+    /// The next step back up.
+    var larger: SnapshotLimits {
+        let d = min(50, depth * 2)
+        let c = children >= 600 ? Self.full.children : children * 2
+        return SnapshotLimits(depth: d, children: c)
+    }
+    var described: String {
+        var parts: [String] = []
+        if depth < 50 { parts.append("depth \(depth)") }
+        if children != Self.full.children { parts.append("at most \(children) children per element") }
+        return parts.joined(separator: ", ")
+    }
+    var caveat: String {
+        var parts: [String] = []
+        if depth < 50 { parts.append("deeper parts of nested elements may be missing") }
+        if children != Self.full.children { parts.append("a long list shows its first \(children) rows only (scroll_to finds the rest)") }
+        return parts.joined(separator: "; ")
+    }
+}
+
 public final class Runner: @unchecked Sendable {
     public let url: URL
     let transport: HTTPTransport
@@ -131,23 +166,22 @@ public final class Runner: @unchecked Sendable {
     /// and to a system alert (a paste or permission prompt) when one is up, so the tree shows it.
     /// `snapshotMaxDepth` (WDA default 50) bounds the tree; after a read that timed out the next
     /// read asks for half the depth (never under 12), and a fast read restores it.
-    static func sessionSettings(deadline: Double, depth: Int) -> JSON {
-        ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": .number(deadline), "activeAppDetectionPoint": "200,420", "snapshotMaxDepth": .number(Double(depth))]
+    static func sessionSettings(deadline: Double, limits: SnapshotLimits) -> JSON {
+        ["animationCoolOffTimeout": 0, "waitForIdleTimeout": 0.5, "accessibilityDeadline": .number(deadline), "activeAppDetectionPoint": "200,420", "snapshotMaxDepth": .number(Double(limits.depth)), "snapshotMaxChildren": .number(Double(limits.children))]
     }
     /// WDA's settings live in its process (FBConfiguration), not in the session: set once per runner
     /// life, by the first session, and again only to change the depth.
     public var accessibilityDeadline: Double = 2
-    let depth = LockedBox(50)
-    let nextDepth = LockedBox(50)
+    let limits = LockedBox(SnapshotLimits.full)
+    let nextLimits = LockedBox(SnapshotLimits.full)
     let settingsApplied = LockedBox(false)
 
-    /// The tree depth for the next read, applied through the session's settings when it differs
+    /// The snapshot limits for the next read, applied through the session's settings when they differ
     /// from what the runner has (a queued request, bounded at 2 s).
-    func useDepth(_ wanted: Int) async {
-        let current = depth.value
-        guard wanted != current, let id = try? await session(timeout: 3) else { return }
-        if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted))]], timeout: 2, countsAsMiss: false)) != nil {
-            depth.value = wanted
+    func useLimits(_ wanted: SnapshotLimits) async {
+        guard wanted != limits.value, let id = try? await session(timeout: 3) else { return }
+        if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": ["snapshotMaxDepth": .number(Double(wanted.depth)), "snapshotMaxChildren": .number(Double(wanted.children))]], timeout: 2, countsAsMiss: false)) != nil {
+            limits.value = wanted
         }
     }
 
@@ -266,7 +300,7 @@ public final class Runner: @unchecked Sendable {
 
     func forgetSession() { state.update { $0.session = nil } }
     /// The runner was restarted: its settings are the defaults again.
-    func forgetRunner() { forgetSession(); settingsApplied.value = false; depth.value = 50; stall.value = nil }
+    func forgetRunner() { forgetSession(); settingsApplied.value = false; limits.value = .full; stall.value = nil }
 
     /// Whether the runner is through with the request this side gave up on: a cheap queued request
     /// (opening the session, or the active app) answered within `timeout` means the queue has
@@ -298,7 +332,7 @@ public final class Runner: @unchecked Sendable {
                     throw RunnerError(message: "the runner opened no session", delivery: .notSent)
                 }
                 // Best effort: a runner that refuses the settings still works, only slower.
-                if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings(deadline: accessibilityDeadline, depth: depth.value)], timeout: 2, countsAsMiss: false)) != nil {
+                if (try? await raw("POST", "/session/\(id)/appium/settings", ["settings": Self.sessionSettings(deadline: accessibilityDeadline, limits: limits.value)], timeout: 2, countsAsMiss: false)) != nil {
                     settingsApplied.value = true
                 }
                 state.update { $0.session = id }

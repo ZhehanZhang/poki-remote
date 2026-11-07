@@ -439,12 +439,13 @@ extension Computer {
     /// the end of the list, at max_swipes, or when the action time runs out.
     func scrollTo(_ spec: JSON, until: Double) async throws -> String {
         let screen = try await screenSize(until: until)
-        let wantedKey: String? = try spec["ref"]?.int.map { try element($0).key }
-        let wantedText = spec.string ?? spec["text"]?.string
+        let wantedElement: Element? = try spec["ref"]?.int.map(element)
+        let wantedKey = wantedElement?.key
+        let wantedText = spec.string ?? spec["text"]?.string ?? wantedElement.flatMap { $0.text.isEmpty ? nil : $0.text }
         guard wantedKey != nil || wantedText != nil else { throw ActionFailure(message: "scroll_to takes text or ref", delivery: .notSent) }
         let region = try area(spec["in"], screen)
         let fingerGoes = ["down": "up", "up": "down", "right": "left", "left": "right"][spec["direction"]?.string ?? "down"] ?? "up"
-        let max = min(12, spec["max_swipes"]?.int ?? 6)
+        let max = min(12, spec["max_swipes"]?.int ?? 10)
         func hit(_ all: [Element]) -> Element? {
             let layout = Layout(all: all, screen: screen)
             return all.first { e in
@@ -456,25 +457,58 @@ extension Computer {
             }
         }
         let wanted = wantedText.map { "\"\($0.prefix(40))\"" } ?? "element \(spec["ref"]!.int!)"
-        var all = lastAll, swipes = 0, last: String?
-        // Each swipe needs its own time and a read after it; when the action's time is nearly up the
-        // scroll stops where it is and says so, so the model calls it again rather than being told
-        // that something unknown may have happened (seen in the gym: 200 rows outran the action's 6 s).
+        // Between swipes the text is looked for with one element search on the runner (an XCTest
+        // query, no tree serialised: a fraction of a full read on a 300-row list, seen in the gym at
+        // 3 s per swipe with the tree); the tree is read once the search finds it, or when the runner
+        // has no search. Each swipe needs about 1.3 s with its search; when less is left the scroll
+        // stops where it is and says so, so the model calls it again rather than being told that
+        // something unknown may have happened.
+        var all = lastAll, swipes = 0, last: String?, searchWorks = wantedText != nil
+        func found(_ e: Element) -> String { "\(swipes) swipes, found at \(e.frame.described)" }
         while hit(all) == nil, swipes < max {
-            guard until - now() > 2.5 else {
+            guard until - now() > (searchWorks ? 1.3 : 2.5) else {
                 return "\(swipes) swipes, \(wanted) not seen yet; the action's time ran out before the list was through (\(Int(config.actionCap)) s): call scroll_to again to go on from here"
             }
-            try await gesture(try swipePath(region, fingerGoes), seconds: 0.3, rest: 0.1, until: until - 1.2)
+            try await gesture(try swipePath(region, fingerGoes), seconds: 0.25, rest: 0.05, until: until - 0.6)
             swipes += 1
-            await sleep(seconds: 0.15)
+            if searchWorks, let text = wantedText {
+                switch await search(text, timeout: Swift.max(0.3, Swift.min(1, until - now() - 0.2))) {
+                case .found:
+                    // One full read to place it (and to list the screen for the model).
+                    if let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) {
+                        all = seen.elements
+                        if let e = hit(all) { return found(e) }
+                        continue
+                    }
+                    return "\(swipes) swipes, \(wanted) is on the screen now (the runner found it); the read after the actions lists it"
+                case .absent: continue
+                case .unknown: searchWorks = false
+                }
+            }
+            await sleep(seconds: 0.1)
             guard let seen = try? await runner.tree(timeout: Swift.max(0.3, Swift.min(1.5, until - now() - 0.2)), format: config.treeFormat) else { continue }
             let signature = seen.elements.map { "\($0.key)@\(Int($0.frame.y))" }.joined(separator: ";")
             if signature == last { return "\(swipes) swipes, \(wanted) not found: the list stopped moving (its end, or the text is not in it)" }
             last = signature
             all = seen.elements
         }
-        if let found = hit(all) { return "\(swipes) swipes, found at \(found.frame.described)" }
+        if let e = hit(all) { return found(e) }
         return "\(swipes) swipes, \(wanted) not seen yet within \(max) swipes: call scroll_to again to go on (max_swipes takes up to 12)"
+    }
+
+    enum Search { case found, absent, unknown }
+
+    /// One element search on the runner: an element whose label or value holds the text.
+    func search(_ text: String, timeout: Double) async -> Search {
+        let quoted = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        do {
+            let value = try await runner.call("POST", "/element", ["using": "predicate string", "value": .string("label CONTAINS[c] '\(quoted)' OR value CONTAINS[c] '\(quoted)'")], timeout: timeout, countsAsMiss: false)
+            return value["ELEMENT"] != nil || value["element-6066-11e4-a52e-4f735466cecf"] != nil ? .found : .absent
+        } catch let e as RunnerError where e.code == "no such element" || e.status == 404 && e.code != nil && e.code != "unknown command" {
+            return .absent
+        } catch {
+            return .unknown
+        }
     }
 
     /// Reads the tree every quarter second until the text is there (or gone), or the screen holds still

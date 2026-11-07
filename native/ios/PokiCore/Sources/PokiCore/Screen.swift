@@ -227,9 +227,9 @@ extension Runner {
         let pictureAt = LockedBox<Double?>(nil)
         // After a read that timed out, the next asks for half the tree's depth (a huge tree is what
         // takes long); a read that came fast restores the full depth for the one after it.
-        let wantedDepth = nextDepth.value
-        if wantedDepth != depth.value { await useDepth(wantedDepth) }
-        let readDepth = depth.value
+        let wanted = nextLimits.value
+        if wanted != limits.value { await useLimits(wanted) }
+        let readLimits = limits.value
         async let treePart: Result<(elements: [Element], foreground: Foreground), Error> = {
             do { return .success(try await self.tree(timeout: timeout, format: format)) } catch { return .failure(error) }
         }()
@@ -255,38 +255,41 @@ extension Runner {
                 } else {
                     reading.notes.append("no element tree: \(e); a second try within the read's time was refused too")
                 }
-            } else if extra > 2, readDepth > 12, "\(e)".contains("did not finish within") || "\(e)".contains("did not answer") {
-                // Timed out: a shallow re-read within this call, once the runner is through with the
-                // slow one (nothing is sent to a busy runner).
-                let shallow = max(12, readDepth / 2)
+            } else if extra > 2, readLimits.smaller != readLimits, "\(e)".contains("did not finish within") || "\(e)".contains("did not answer") {
+                // Timed out: a smaller re-read within this call, once the runner is through with the
+                // slow one (nothing is sent to a busy runner). Fewer children per element first: a
+                // dense screen (1,500 cells side by side in the gym) is wide, not deep.
+                let smaller = readLimits.smaller
                 let retryUntil = now() + extra
-                reading.notes.append("no element tree at depth \(readDepth): \(e)")
+                reading.notes.append("no element tree (\(readLimits.isFull ? "full" : readLimits.described)): \(e)")
                 if await waitUntilFree(timeout: min(3, retryUntil - now() - 1.5)) {
-                    await useDepth(shallow)
-                    if depth.value == shallow, let again = try? await self.tree(timeout: max(0.5, min(2, retryUntil - now() - 0.2)), format: format) {
+                    await useLimits(smaller)
+                    if limits.value == smaller, let again = try? await self.tree(timeout: max(0.5, min(2, retryUntil - now() - 0.2)), format: format) {
                         reading.elements = again.elements; reading.foreground = again.foreground; treeCame = true
                         reading.notes.removeLast()
-                        reading.notes.append("the full tree timed out (\(e)), so it was read again to depth \(shallow) within this call; deeper parts of nested elements may be missing")
+                        reading.notes.append("the full tree timed out (\(e)), so it was read again with \(smaller.described) within this call; \(smaller.caveat)")
                     }
                 }
-                if !treeCame { nextDepth.value = shallow }
+                if !treeCame { nextLimits.value = smaller }
             } else {
                 reading.notes.append("no element tree: \(e)")
             }
         }
         let treeAt = now()
         if treeCame {
-            let noteSaysDepth = reading.notes.last?.contains("within this call") ?? false
-            if depth.value < 50, !noteSaysDepth { reading.notes.append("the tree was read to depth \(depth.value) (the read before timed out at a greater depth); deeper parts of nested elements may be missing") }
-            if treeAt - started < 1.5, depth.value < 50 { nextDepth.value = min(50, depth.value * 2) }
+            let noteSaysLimits = reading.notes.last?.contains("within this call") ?? false
+            let read = limits.value
+            if !read.isFull, !noteSaysLimits { reading.notes.append("the tree was read with \(read.described) (the read before timed out with more); \(read.caveat)") }
+            if treeAt - started < 1.5, !read.isFull { nextLimits.value = read.larger }
         } else if let last = reading.notes.last, last.contains("did not finish within") || last.contains("did not answer") {
-            nextDepth.value = max(12, readDepth / 2)
+            nextLimits.value = readLimits.smaller
         }
         switch await picturePart {
         case .success(let png)?: reading.png = png
         case .failure(let e)?:
-            // The host's own path is fast and apart from the runner: it gets 2 s of its own.
-            if let fallback = screenshotFallback, let png = (try? await withDeadline(2, "the host's screenshot") { await fallback() }) ?? nil {
+            // The host's own path is apart from the runner: it gets up to 6 s of its own (simctl on a CI
+            // simulator took over 2 s, seen in the gym).
+            if let fallback = screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil {
                 reading.png = png
                 reading.notes.append("screenshot: taken apart from the runner (the runner gave none: \(e))")
             } else {

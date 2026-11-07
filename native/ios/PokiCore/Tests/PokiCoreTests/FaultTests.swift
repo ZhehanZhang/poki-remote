@@ -826,7 +826,7 @@ final class GymTests: XCTestCase {
         _ = await core.call("look", [:])
         let shallow = LockedBox(false)
         wda.set("POST /appium/settings") { body in
-            if body?["settings"]?["snapshotMaxDepth"]?.double == 25 { shallow.value = true }
+            if body?["settings"]?["snapshotMaxChildren"]?.double == 150 { shallow.value = true }
             return (200, ["value": .null])
         }
         let root: JSON = ["type": "XCUIElementTypeApplication", "label": "Settings", "rect": ["x": 0, "y": 0, "width": 390, "height": 844], "children": .array([
@@ -839,7 +839,7 @@ final class GymTests: XCTestCase {
         }
         let look = await core.call("look", [:])
         XCTAssertTrue(look.text.contains("Row 1"), look.text)
-        XCTAssertTrue(look.text.contains("so it was read again to depth 25 within this call"), look.text)
+        XCTAssertTrue(look.text.contains("so it was read again with at most 150 children per element within this call; a long list shows its first 150 rows only"), look.text)
         XCTAssertFalse(look.isError)
     }
 
@@ -854,8 +854,31 @@ final class GymTests: XCTestCase {
             Node("WebView", nil, [0, 104, 390, 740]),
         ], app: "Gym")
         let look = await core.call("look", [:])
-        XCTAssertTrue(look.text.contains("WebView \"web page (its parts are not in the tree)\" [0,104,390,740] [collapsed]"), look.text)
+        XCTAssertTrue(look.text.contains("WebView \"web page (its parts are not in the tree yet: read again in a second)\" [0,104,390,740] [collapsed]"), look.text)
         XCTAssertTrue(look.text.contains("\"A web page\"") && look.text.contains("\"Open\""), look.text)
         XCTAssertTrue(look.text.contains("(read from the picture)"), look.text)
+    }
+
+    /// The gym's 300-row list: with a full tree read after every swipe each swipe cost 3 s and two
+    /// swipes fit an action. Now one element search on the runner follows each swipe, and the tree
+    /// is read once it is found.
+    func testScrollToSearchesBetweenSwipesAndReadsTheTreeOnceFound() async {
+        let (core, wda, _) = makeCore { $0.actionCap = 6 }
+        _ = await core.call("look", [:])
+        let swipes = LockedBox(0)
+        wda.set("POST /wda/pressAndDragWithVelocity") { [wda] _ in
+            let n = swipes.update { $0 += 1; return $0 }
+            wda.source((0..<10).map { ("Cell", "Row \(n * 10 + $0)") })
+            return (200, ["value": .null])
+        }
+        wda.set("POST /element") { body in
+            guard let value = body?["value"]?.string, value.contains("Row 45"), swipes.value >= 4 else { return (404, ["value": ["error": "no such element", "message": "unable to find an element"]]) }
+            return (200, ["value": ["ELEMENT": "e1"]])
+        }
+        let result = await core.call("do", ["actions": [["scroll_to": "Row 45"]]])
+        XCTAssertTrue(result.text.contains("scroll_to \"Row 45\": 4 swipes, found at [16,320,358,44]"), result.text)
+        XCTAssertEqual(wda.sent.filter { $0 == "POST /element" }.count, 4, "\(wda.sent)")
+        XCTAssertEqual(wda.sent.filter { $0 == "GET /source" }.count, 3, "one read before, one once found, one after the actions: \(wda.sent)")
+        XCTAssertTrue(wda.bodies("POST /element").first?["value"]?.string?.contains("label CONTAINS[c] 'Row 45'") ?? false)
     }
 }

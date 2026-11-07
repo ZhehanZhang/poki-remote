@@ -121,7 +121,9 @@ final class Computer: @unchecked Sendable {
         let emptyWeb = shown.contains { $0.type == "WebView" && collapsed.contains($0.node) }
         if full || emptyWeb, !collapsed.isEmpty, let png = reading.png, size != nil {
             let host = self.host
-            let left = max(0.3, min(2, until - now() - 0.5))
+            // Vision's first pass on a CI simulator took 3.7 s (seen in the gym); the read gives it 4 s
+            // when the call has them.
+            let left = max(0.3, min(4, until - now() - 0.5))
             if let texts = (try? await withDeadline(left, "reading text from the picture", { await host.recognizeText(inPNG: png) })) ?? nil {
                 // Each text goes right after the collapsed element it lies in, top to bottom.
                 var inside: [Int: [Element]] = [:]
@@ -133,7 +135,7 @@ final class Computer: @unchecked Sendable {
                 }
                 shown = shown.flatMap { e in [e] + (inside[e.node] ?? []).sorted { ($0.frame.y, $0.frame.x) < ($1.frame.y, $1.frame.x) } }
             } else {
-                notes.append("no text read from the picture")
+                notes.append("no text read from the picture (reading it did not finish within \(DeadlineExceeded.format(left)); call look again, or tap a point on the picture)")
             }
         }
 
@@ -212,7 +214,7 @@ final class Computer: @unchecked Sendable {
         }
 
         func line(_ ref: Int, _ e: Element, _ mark: String) -> String {
-            var text = e.text.isEmpty && e.type == "WebView" ? "web page (its parts are not in the tree)" : e.text
+            var text = e.text.isEmpty && e.type == "WebView" ? "web page (its parts are not in the tree yet: read again in a second)" : e.text
             if !full, text.count > Self.textLimit { text = "\(text.prefix(Self.textLimit - 10))… (+\(text.count - Self.textLimit + 10) characters)" }
             let tag = e.fromPicture ? " (read from the picture)" : collapsed.contains(e.node) ? " [collapsed]" : ""
             return "\(mark)\(ref) \(e.type) \"\(text)\" \(e.frame.described)\(tag)"
@@ -268,7 +270,7 @@ final class Computer: @unchecked Sendable {
     func withPicture(_ text: String, timeout: Double, remember: Bool = true, isErrorWithoutPicture: Bool = true) async -> ToolResult {
         guard timeout > 0.3, let png = try? await runner.screenshot(timeout: min(3, timeout)) else {
             // The runner gives none: the host's own path to the screen, when it has one.
-            if timeout > 0.3, let png = await runner.screenshotFallback?(), let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6) {
+            if timeout > 0.3, let fallback = runner.screenshotFallback, let png = (try? await withDeadline(6, "the host's screenshot") { await fallback() }) ?? nil, let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6) {
                 return ToolResult(text: text + "\nscreenshot: the screen now, taken apart from the runner (nothing was sent)", jpeg: jpeg, isError: false)
             }
             return ToolResult(text: text + "\nscreenshot: none (the runner did not give one either)", jpeg: nil, isError: isErrorWithoutPicture)
