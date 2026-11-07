@@ -160,7 +160,7 @@ public final class Runner: @unchecked Sendable {
             }
         } catch TransportError.refused {
             miss()
-            throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted", delivery: .notSent, silent: true)
+            throw RunnerError(message: "the runner is not running (connection refused at \(url.absoluteString)); it is being restarted: call look again in about 10 s", delivery: .notSent, silent: true)
         } catch let error as DeadlineExceeded {
             if countsAsMiss { miss(timedOut: true) }
             if queued { abandon(method, path, endSession: method != "GET") }

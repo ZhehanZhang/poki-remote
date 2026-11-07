@@ -57,6 +57,19 @@ extension Computer {
     /// A container the size of the screen (a toolbar wrapper, a sheet's full-screen close control)
     /// has no centre worth tapping; the answer says where the tap went (seen on the phone: taps on a
     /// 402 by 874 "toolbar" element in a shop app).
+    /// Types that hold other elements and take no tap of their own.
+    static let containers: Set<String> = ["Alert", "Sheet", "Window", "Other", "Group", "Table", "CollectionView", "ScrollView", "NavigationBar", "Toolbar", "TabBar", "Application", "Dialog", "Popover", "WebView", "List"]
+
+    /// A tap on a container (an alert, a sheet, a toolbar) does nothing by itself: name the listed
+    /// elements inside it, so the model taps one of those next.
+    func container(_ spec: JSON?) -> String {
+        guard let spec, let ref = spec.int ?? spec["ref"]?.int, let e = refs[ref], !e.fromPicture, Self.containers.contains(e.type) else { return "" }
+        let inside = listed.filter { $0.ref != ref && e.contains($0.element) }
+        guard !inside.isEmpty else { return "" }
+        let names = inside.prefix(8).map { "\($0.ref) \"\($0.element.text.prefix(30))\"" }.joined(separator: ", ")
+        return " (this element is a \(e.type), a container; the elements inside it are \(names)\(inside.count > 8 ? ", …" : ""); tap one of those)"
+    }
+
     func fillsScreen(_ spec: JSON?, _ p: (x: Double, y: Double)) -> String {
         guard let spec, let ref = spec.int ?? spec["ref"]?.int, let e = refs[ref], let size else { return "" }
         guard e.frame.width * e.frame.height >= 0.8 * size.width * size.height else { return "" }
@@ -127,7 +140,7 @@ extension Computer {
         if let spec = action["tap"] {
             let p = try point(spec)
             try await tap(p)
-            return ("tap", "tap \(describe(action))\(offCentre(spec, p))\(fillsScreen(spec, p))")
+            return ("tap", "tap \(describe(action))\(offCentre(spec, p))\(fillsScreen(spec, p))\(container(spec))")
         }
         if let text = action["type"]?.text {
             if let ref = action["ref"] {

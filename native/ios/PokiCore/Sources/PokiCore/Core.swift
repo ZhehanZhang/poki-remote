@@ -319,7 +319,9 @@ public final class PokiCore: @unchecked Sendable {
         let activity = ToolActivity(id: UUID().uuidString, name: name, summary: name == "do" ? computer.labels(args["actions"]?.array ?? []) : "Look at the screen", started: Date())
         // One tool call at a time per phone; a second waits briefly, then says what the first is doing.
         guard await gate.enter(waiting: config.busyWait) else {
-            return ToolResult(text: "busy: another call is still running (\(gate.current ?? "a tool")); nothing was sent. Try again in a moment.", jpeg: nil, isError: true)
+            // The screenshot is served apart from the runner's queue, so a busy answer still shows
+            // the screen (the owner's rule: every answer carries the picture while the runner is up).
+            return await computer.withPicture("busy: another call is still running (\(gate.current ?? "a tool")); nothing was sent. Call again in a moment.", timeout: 3, remember: false)
         }
         gate.current = "\(name): \(activity.summary)"
         emit(.toolStarted(activity))

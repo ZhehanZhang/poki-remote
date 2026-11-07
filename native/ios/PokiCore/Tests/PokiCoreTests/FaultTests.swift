@@ -704,4 +704,27 @@ final class GymTests: XCTestCase {
         XCTAssertTrue(look.text.contains("runner: starting (the phone is asking the owner for the passcode)"), look.text)
         XCTAssertTrue(look.text.contains("call look or status again every few seconds"), look.text)
     }
+
+    func testABusyGateAnswersWithThePicture() async {
+        let (core, wda, _) = makeCore { $0.busyWait = 0.2 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 1.5)
+        async let slow = core.call("look", [:])
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let busy = await core.call("look", [:])
+        XCTAssertTrue(busy.text.hasPrefix("busy: another call is still running"), busy.text)
+        XCTAssertNotNil(busy.jpeg)
+        XCTAssertFalse(busy.isError)
+        _ = await slow
+    }
+
+    func testATapOnAContainerNamesTheElementsInsideIt() async {
+        let (core, wda, _) = makeCore()
+        wda.tree([Node("Alert", "Gym alert", [20, 300, 350, 200], [Node("StaticText", "An alert on top of the screen.", [40, 320, 310, 40]), Node("Button", "Cancel", [40, 440, 150, 44]), Node("Button", "OK", [200, 440, 150, 44])])], app: "Gym")
+        let look = await core.call("look", [:])
+        guard let n = look.text.split(separator: "\n").first(where: { $0.contains("Alert") })?.trimmingCharacters(in: .whitespaces).split(separator: " ").first.flatMap({ Int($0) }) else { return XCTFail(look.text) }
+        let tap = await core.call("do", ["actions": [["tap": .number(Double(n))]]])
+        XCTAssertTrue(tap.text.contains("this element is a Alert, a container; the elements inside it are"), tap.text)
+        XCTAssertTrue(tap.text.contains("\"Cancel\"") && tap.text.contains("\"OK\"") && tap.text.contains("tap one of those"), tap.text)
+    }
 }

@@ -261,9 +261,9 @@ final class Computer: @unchecked Sendable {
 
     /// An answer with nothing done but the picture (served apart from WDA's queue), so a busy runner
     /// never leaves the model blind: it sees the screen and the next look is not an error.
-    func withPicture(_ text: String, timeout: Double) async -> ToolResult {
+    func withPicture(_ text: String, timeout: Double, remember: Bool = true) async -> ToolResult {
         guard timeout > 0.3, let png = try? await runner.screenshot(timeout: min(3, timeout)) else { return ToolResult(text: text, jpeg: nil, isError: true) }
-        lastPNG = png
+        if remember { lastPNG = png }
         let size = try? await screenSize(until: now() + 1)
         let jpeg = try? host.jpeg(fromPNG: png, width: Self.pictureWidth(size), quality: 0.6)
         return ToolResult(text: text + (jpeg == nil ? "" : "\nscreenshot: the screen now (nothing was sent)"), jpeg: jpeg, isError: jpeg == nil)
@@ -317,7 +317,6 @@ final class Computer: @unchecked Sendable {
             state = host.runnerState()
         }
         guard !state.isRunning else { return nil }
-        let next: String
         // A runner that is starting (the first start after a restart can wait for the owner's
         // password or Developer Mode on the phone) is not an error: the model keeps polling look
         // or status every few seconds and goes on when it is up; the owner is told on the phone.
