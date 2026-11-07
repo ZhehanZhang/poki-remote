@@ -2,6 +2,18 @@
 
 What changed in each round, and what still needs the phone. Newest first.
 
+## Round 6 (2026-11-07, after the 10:32 pm ET Mail test), version 0.2.2
+
+Changed:
+- Poki stays out of the agent's way: no Dynamic Island pop-up per step, at start or on an app switch (approval, problem, pairing and finish only); the island area is never listed in the tree; if a tap lands in Poki, PokiCore brings the previous app back; Allow from the Live Activity reaches PokiCore 1.5 s after the tap.
+- Live Activity margins for iOS 27's container (22 pt sides, 18 pt top/bottom; expanded island 24/18/22 pt).
+- PokiCore: the action clock starts once the runner answers; per-action budgets in a batch; "buy" inside "Best Buy" is not a payment.
+- The app logs when Poki came to the front during a step.
+
+Needs the phone:
+- No Poki in front after taps near the top of Mail or X; the action after Allow runs in the right app.
+- Lock Screen and expanded island without clipped text.
+
 ## Round 5 (2026-11-07, after the 00:20Z phone test)
 
 Changed:
