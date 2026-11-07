@@ -410,6 +410,25 @@ final class FaultTests: XCTestCase {
         XCTAssertTrue(result.text.contains("wait_until: the screen held still after"), result.text)
     }
 
+    /// The soak on CI (call 101): a look after a timed-out read wanted smaller limits, and setting
+    /// them opened a session, which hung; the look waited 3 s on it past its read and answered from
+    /// the backstop. The limits go with the next open instead; a look never waits on an open for them.
+    func testALookNeverWaitsOnASessionOpenForTheSnapshotLimits() async {
+        let (core, wda, _) = makeCore { $0.readTimeout = 1; $0.toolDeadline = 4 }
+        _ = await core.call("look", [:])
+        wda.delay("GET /source", 2.5)
+        let slow = await core.call("look", [:])
+        XCTAssertTrue(slow.text.contains("no element tree"), slow.text)
+        wda.source([("Button", "General"), ("Button", "Privacy")])
+        core.runner.forgetSession()
+        wda.delay("POST /session", 10)
+        let started = Date()
+        let look = await core.call("look", [:])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5, look.text)
+        XCTAssertTrue(look.text.contains("1 Button"), look.text)
+        XCTAssertFalse(look.text.hasPrefix("error:"), look.text)
+    }
+
     /// CI simulator (ios-core run 48): a read took 4.5 s, two did not fit the action's 6 s, and the
     /// wait ran out of its time as "unknown". The read before the call, when fresh, is the first
     /// sample; a wait never runs out as unknown (it sends nothing).
