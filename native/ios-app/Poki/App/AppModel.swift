@@ -402,7 +402,7 @@ final class AppModel {
             }
         case .handoffRequested(let id, let kind, let text, let app):
             lastAgentActivity = Date()
-            let shown = PokiActivityAttributes.ContentState.Handoff.Kind(rawValue: kind) ?? .other
+            let shown = PokiActivityAttributes.Handoff.Kind(rawValue: kind) ?? .other
             handoffText = text ?? Self.handoffWording(shown)
             log.add("handoff", "the agent handed over \(id) (\(kind))\(app.map { " in \($0)" } ?? ""): \(handoffText ?? "")")
             activity.update { state in
@@ -467,7 +467,7 @@ final class AppModel {
     static let runnerPasscodeHandoff = "runner-passcode"
 
     /// What the owner is asked to do, when the model gave no words of its own.
-    static func handoffWording(_ kind: PokiActivityAttributes.ContentState.Handoff.Kind) -> String {
+    static func handoffWording(_ kind: PokiActivityAttributes.Handoff.Kind) -> String {
         switch kind {
         case .runnerPasscode: "The phone asks for your passcode so the runner can start"
         case .passcode: "The screen asks for your passcode"
