@@ -793,8 +793,9 @@ final class GymTests: XCTestCase {
         let stuck = await core.call("look", [:])
         XCTAssertTrue(stuck.text.contains("still finishing an earlier") && stuck.text.contains("restarted on its own if it is not through"), stuck.text)
         XCTAssertNotNil(core.runner.busyWith)
-        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // 0.6 s stall + a 3 s probe that is not answered: the runner is restarted (within 8 s; a
+        // loaded CI runner is slower, and the stuck look above answers at once now).
+        for _ in 0..<80 where host.restarts.value == 0 { try? await Task.sleep(nanoseconds: 100_000_000) }
         XCTAssertEqual(host.restarts.value, 1, "the wedged runner was restarted")
         XCTAssertNil(core.runner.busyWith, "the stall went with the old runner")
         XCTAssertTrue(core.runner.lastRestart.value?.contains("wedged on ") ?? false, core.runner.lastRestart.value ?? "nil")
